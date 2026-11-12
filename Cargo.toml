@@ -1,0 +1,24 @@
+[package]
+name = "linux-task-manager"
+version = "0.0.1"
+edition = "2021"
+description = "A lightweight, Windows-inspired task manager for Linux"
+license = "MIT"
+repository = "https://github.com/damgru/linux-task-manager"
+readme = "README.md"
+keywords = ["linux", "task-manager", "egui", "monitor"]
+categories = ["gui", "os::linux-apis"]
+
+[dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+winit = { version = "0.30.13", default-features = false, features = ["x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2"
+resvg = { version = "0.45", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

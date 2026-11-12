@@ -1,0 +1,9 @@
+/target/
+/shots/
+
+/.cargo-cache/
+/.release/
+*.AppImage
+*.deb
+*.tar.gz
+__pycache__/

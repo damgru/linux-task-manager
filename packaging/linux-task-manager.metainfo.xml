@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.damgru.linux-task-manager</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="com.github.damgru"><name>damgru</name></developer>
+  <name>Linux Task Manager</name>
+  <summary>Monitor Linux processes and system resources</summary>
+  <description>
+    <p>A native Rust task manager with process trees, CPU and memory graphs,
+    disk and network telemetry, and scoped system operations.</p>
+  </description>
+  <launchable type="desktop-id">com.github.damgru.linux-task-manager.desktop</launchable>
+  <url type="homepage">https://github.com/damgru/linux-task-manager</url>
+  <url type="bugtracker">https://github.com/damgru/linux-task-manager/issues</url>
+  <provides><binary>linux-task-manager</binary></provides>
+  <releases><release version="0.0.1" date="2026-11-12"/></releases>
+  <content_rating type="oars-1.1"/>
+</component>

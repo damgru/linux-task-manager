@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Task Manager
+Name[pl]=Menedżer zadań
+Comment=Monitor applications, processes and system resources
+Exec=linux-task-manager
+Icon=linux-task-manager
+StartupWMClass=linux-task-manager
+Terminal=false
+Categories=System;Monitor;
