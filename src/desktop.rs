@@ -4,9 +4,12 @@ use eframe::egui::ColorImage;
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
+const DESKTOP_FILE_LIMIT: u64 = 64 * 1024;
+const ICON_FILE_LIMIT: u64 = 2 * 1024 * 1024;
 #[derive(Debug)]
 pub struct DesktopApp {
     pub id: String,
@@ -93,7 +96,7 @@ impl Catalog {
                 if !seen.insert(id.clone()) {
                     return;
                 }
-                let Ok(contents) = fs::read_to_string(&path) else {
+                let Ok(contents) = read_desktop_file(&path) else {
                     return;
                 };
                 let fields = desktop_fields(&contents);
@@ -157,6 +160,14 @@ impl Catalog {
         Some(app)
     }
 }
+fn read_desktop_file(path: &Path) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(DESKTOP_FILE_LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > DESKTOP_FILE_LIMIT {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "desktop entry exceeds 64 KiB"));
+    }
+    String::from_utf8(bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 fn desktop_fields(text: &str) -> HashMap<&str, &str> {
     let mut active = false;
     let mut fields = HashMap::new();
@@ -185,11 +196,13 @@ fn icon_score(path: &Path) -> u8 {
 }
 fn load_icon(path: &Path) -> Option<ColorImage> {
     // Bound input and output independently of an icon's advertised dimensions.
-    if fs::metadata(path).ok()?.len() > 2 * 1024 * 1024 {
-        return None;
-    }
     if path.extension()?.to_str()? == "svg" {
-        let tree = resvg::usvg::Tree::from_data(&fs::read(path).ok()?, &resvg::usvg::Options::default()).ok()?;
+        let mut bytes = Vec::new();
+        fs::File::open(path).ok()?.take(ICON_FILE_LIMIT + 1).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 > ICON_FILE_LIMIT {
+            return None;
+        }
+        let tree = resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default()).ok()?;
         let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32)?;
         let scale = 32.0 / tree.size().width().max(tree.size().height());
         resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
@@ -197,6 +210,9 @@ fn load_icon(path: &Path) -> Option<ColorImage> {
             pixmap.pixels().iter().map(|p| eframe::egui::Color32::from_rgba_premultiplied(p.red(), p.green(), p.blue(), p.alpha())).collect();
         Some(ColorImage { size: [32, 32], pixels })
     } else {
+        if fs::metadata(path).ok()?.len() > ICON_FILE_LIMIT {
+            return None;
+        }
         let mut reader = image::ImageReader::open(path).ok()?;
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(2048);
@@ -210,6 +226,14 @@ fn load_icon(path: &Path) -> Option<ColorImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_entry_reads_have_a_fixed_limit() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("task-manager-entry-{}-{unique}", std::process::id()));
+        fs::write(&path, vec![b'a'; DESKTOP_FILE_LIMIT as usize + 1]).unwrap();
+        assert!(read_desktop_file(&path).is_err(), "oversized desktop metadata must be rejected");
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn png_and_svg_icons_are_decoded_to_small_textures() {
         let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();

@@ -291,6 +291,9 @@ pub fn tr(s: &str) -> &str {
         "System authentication is unavailable. Install polkit and enable a desktop authentication agent." => {
             "Uwierzytelnianie systemowe jest niedostępne. Zainstaluj Polkit i włącz agenta uwierzytelniania pulpitu."
         }
+        "This process priority change requires administrator access and cannot be safely authorized." => {
+            "Zmiana priorytetu tego procesu wymaga uprawnień administratora, których nie można bezpiecznie autoryzować."
+        }
         "Authentication cancelled. No changes were made." => "Anulowano uwierzytelnianie. Nie wprowadzono zmian.",
         "Authentication was denied or no desktop authentication agent is running." => {
             "Odmówiono uwierzytelnienia lub agent uwierzytelniania pulpitu nie działa."

@@ -723,7 +723,12 @@ impl TaskManager {
         let action = PrivilegedAction::Process { pid: p.pid, start: p.start, name: p.name.clone(), action };
         match action.run() {
             Ok(()) => self.notify("Action completed.", false),
-            Err(e) if permission_denied(&e) => self.authorization = Some(action),
+            Err(e) if permission_denied(&e) && matches!(&action, PrivilegedAction::Process { action: ProcessAction::Efficiency, .. }) => {
+                self.notify("This process priority change requires administrator access and cannot be safely authorized.", true)
+            }
+            Err(e) if permission_denied(&e) && !matches!(&action, PrivilegedAction::Process { action: ProcessAction::Efficiency, .. }) => {
+                self.authorization = Some(action)
+            }
             Err(e) => self.notify(e, true),
         }
     }
