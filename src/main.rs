@@ -3,6 +3,8 @@ mod application_page;
 mod commands;
 mod demo;
 mod desktop;
+mod docker;
+mod docker_page;
 mod gpu;
 mod integration;
 mod model;
@@ -41,6 +43,7 @@ enum Page {
     Users,
     Details,
     Services,
+    Docker,
     Settings,
 }
 impl Page {
@@ -54,11 +57,23 @@ impl Page {
             Self::Users => "Users",
             Self::Details => "Details",
             Self::Services => "Services",
+            Self::Docker => "Docker",
             Self::Settings => "Settings",
         }
     }
-    fn all() -> [Self; 9] {
-        [Self::Apps, Self::Processes, Self::Performance, Self::History, Self::Startup, Self::Users, Self::Details, Self::Services, Self::Settings]
+    fn all() -> [Self; 10] {
+        [
+            Self::Apps,
+            Self::Processes,
+            Self::Performance,
+            Self::History,
+            Self::Startup,
+            Self::Users,
+            Self::Details,
+            Self::Services,
+            Self::Docker,
+            Self::Settings,
+        ]
     }
     fn icon(self) -> usize {
         match self {
@@ -69,6 +84,7 @@ impl Page {
             Self::Startup => 3,
             Self::Users => 4,
             Self::Services => 6,
+            Self::Docker => 10,
             Self::Settings => 7,
         }
     }
@@ -167,6 +183,8 @@ struct Settings {
     tree: bool,
     columns: Vec<Column>,
     detail_columns: Vec<Column>,
+    docker_columns: Vec<usize>,
+    docker_image_columns: Vec<usize>,
     hide_virtual_networks: bool,
     footer: Vec<FooterItem>,
     column_widths: HashMap<String, f32>,
@@ -184,6 +202,8 @@ impl Default for Settings {
             tree: true,
             columns: Column::defaults(),
             detail_columns: Column::details(),
+            docker_columns: docker_page::default_columns(false),
+            docker_image_columns: docker_page::default_columns(true),
             hide_virtual_networks: false,
             footer: vec![FooterItem::Processes, FooterItem::Cpu, FooterItem::Memory],
             column_widths: HashMap::new(),
@@ -214,6 +234,8 @@ impl Settings {
                     "tree" => s.tree = v != "false",
                     "detail_columns" => s.detail_columns = Column::parse_list(v),
                     "columns" => s.columns = Column::parse_list(v),
+                    "docker_columns" => s.docker_columns = docker_page::parse_columns(v, false),
+                    "docker_image_columns" => s.docker_image_columns = docker_page::parse_columns(v, true),
                     "columns_version" => columns_version = v.parse().unwrap_or(1),
                     "column_widths" => {
                         for entry in v.split('|').take(256) {
@@ -255,7 +277,7 @@ impl Settings {
         let mut widths: Vec<_> = self.column_widths.iter().collect();
         widths.sort_by(|a, b| a.0.cmp(b.0));
         format!(
-                "theme={}\nstart={}\ninterval={}\ntop={}\nlow={}\nconfirm={}\nlanguage={}\ntree={}\ncolumns={}\ndetail_columns={}\nhide_virtual_networks={}\ncolumns_version=3\nfooter={}\ncolumn_widths={}\n",
+                "theme={}\nstart={}\ninterval={}\ntop={}\nlow={}\nconfirm={}\nlanguage={}\ntree={}\ncolumns={}\ndetail_columns={}\nhide_virtual_networks={}\ncolumns_version=3\nfooter={}\ncolumn_widths={}\ndocker_columns={}\ndocker_image_columns={}\n",
                 self.theme,
                 self.start.title().to_lowercase().replace(' ', "-"),
                 self.interval,
@@ -268,7 +290,9 @@ impl Settings {
                 self.detail_columns.iter().map(|c| c.key()).collect::<Vec<_>>().join(","),
                 self.hide_virtual_networks,
                 self.footer.iter().map(|item| item.key()).collect::<Vec<_>>().join(","),
-                widths.iter().map(|(key, width)| format!("{key}:{width}")).collect::<Vec<_>>().join("|")
+                widths.iter().map(|(key, width)| format!("{key}:{width}")).collect::<Vec<_>>().join("|"),
+                docker_page::serialize_columns(&self.docker_columns, false),
+                docker_page::serialize_columns(&self.docker_image_columns, true)
         )
     }
 }
@@ -293,6 +317,7 @@ enum Worker {
     Authorize(PrivilegedAction),
 }
 struct TaskManager {
+    docker: docker_page::DockerView,
     application: Option<application_page::ApplicationView>,
     properties: Option<Process>,
     metadata_busy: bool,
@@ -503,6 +528,15 @@ fn icon(p: &Painter, c: Pos2, kind: usize, color: Color32) {
             p.line_segment([c + vec2(0.0, -5.0), c + vec2(0.0, 5.0)], st);
             p.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], st);
         }
+        10 | 11 => {
+            for (x, y) in [(-7.0, -3.0), (-1.0, -3.0), (5.0, -3.0), (-1.0, -9.0)] {
+                p.rect_stroke(Rect::from_min_size(c + vec2(x, y), vec2(5.0, 5.0)), 0.0, st, StrokeKind::Inside);
+            }
+            p.line_segment([c + vec2(-9.0, 5.0), c + vec2(9.0, 5.0)], st);
+            p.line_segment([c + vec2(-7.0, 5.0), c + vec2(-4.0, 9.0)], st);
+            p.line_segment([c + vec2(-4.0, 9.0), c + vec2(5.0, 9.0)], st);
+            p.line_segment([c + vec2(5.0, 9.0), c + vec2(9.0, 5.0)], st);
+        }
         _ => {
             p.circle_stroke(c, 8.0, st);
             p.line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], st);
@@ -588,6 +622,7 @@ impl TaskManager {
         monitor.interval.store(if settings.low_memory { 5000 } else { settings.interval }, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         Self {
+            docker: docker_page::DockerView::new(&cc.egui_ctx),
             application: None,
             properties: None,
             metadata_busy: false,
@@ -640,6 +675,7 @@ impl TaskManager {
             self.selected = None;
         }
         self.page = page;
+        self.docker.back();
         self.search.clear();
         if page == Page::Services {
             self.load_services();
@@ -861,7 +897,11 @@ impl TaskManager {
                                 vec2(width - 53.0, 24.0),
                                 TextEdit::singleline(&mut self.search)
                                     .frame(false)
-                                    .hint_text(tr("Type a name, user, or PID to search"))
+                                    .hint_text(tr(if self.page == Page::Docker {
+                                        "Search projects, containers or images"
+                                    } else {
+                                        "Type a name, user, or PID to search"
+                                    }))
                                     .id(Id::new("search")),
                             );
                             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::F)) {
@@ -905,7 +945,9 @@ impl TaskManager {
                 }
                 ui.add_space(4.0);
                 for page in Page::all().into_iter().filter(|p| *p != Page::Settings) {
-                    self.nav_item(ui, page, width);
+                    if page != Page::Docker || self.docker.installed {
+                        self.nav_item(ui, page, width);
+                    }
                 }
                 let remaining = ui.available_height() - 48.0;
                 ui.add_space(remaining.max(0.0));
@@ -932,6 +974,10 @@ impl TaskManager {
         }
     }
     fn toolbar(&mut self, ui: &mut Ui) {
+        if self.page == Page::Docker {
+            self.docker.toolbar(ui, &mut self.settings);
+            return;
+        }
         if self.application.is_some() {
             self.application_toolbar(ui);
             return;
@@ -2104,7 +2150,7 @@ impl TaskManager {
                     ui.add_space(3.0);
                     Self::setting_card(ui, 0, "Default start page", "Choose the page shown when opening Task Manager", |ui| {
                         ComboBox::from_id_salt("start").width(180.0).selected_text(tr(self.settings.start.title())).show_ui(ui, |ui| {
-                            for page in Page::all() {
+                            for page in Page::all().into_iter().filter(|p| *p != Page::Docker || self.docker.installed) {
                                 changed |= ui.selectable_value(&mut self.settings.start, page, tr(page.title())).changed();
                             }
                         });
@@ -2389,6 +2435,12 @@ impl eframe::App for TaskManager {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
         self.update_data();
+        if let Some(result) = self.docker.poll(ctx, self.page == Page::Docker, self.settings.interval, self.settings.low_memory) {
+            match result {
+                Ok(()) => self.notify("Action completed.", false),
+                Err(e) => self.notify(e, true),
+            }
+        }
         if self.data.sampled > 0 {
             if let Some(pid) = self.application_request.take() {
                 if let Some(process) = self.data.processes.iter().find(|p| p.pid == pid).cloned() {
@@ -2397,6 +2449,9 @@ impl eframe::App for TaskManager {
                     self.notify("The process exited or changed. Select it again.", true);
                 }
             }
+        }
+        if self.page == Page::Docker && self.docker.detection_finished() && !self.docker.installed {
+            self.switch(Page::Apps);
         }
         self.load_application_metadata(ctx);
         if self.frames == 1 {
@@ -2416,7 +2471,11 @@ impl eframe::App for TaskManager {
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Delete)) && !ctx.wants_keyboard_input() && self.properties.is_none() {
-            self.ask_end();
+            if self.page == Page::Docker {
+                self.docker.ask_delete();
+            } else {
+                self.ask_end();
+            }
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.run_dialog = false;
@@ -2425,7 +2484,11 @@ impl eframe::App for TaskManager {
             self.properties = None;
         }
         if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowLeft)) {
-            self.close_application();
+            if self.page == Page::Docker {
+                self.docker.back();
+            } else {
+                self.close_application();
+            }
         }
         self.titlebar(ctx);
         self.sidebar(ctx);
@@ -2449,8 +2512,12 @@ impl eframe::App for TaskManager {
                 Page::History => self.history_table(ui),
                 Page::Users => self.users_table(ui),
                 Page::Settings => self.settings_ui(ui),
+                Page::Docker => self.docker.show(ui, &self.search, &mut self.settings),
             }
         });
+        if std::mem::take(&mut self.docker.settings_changed) {
+            self.apply_settings(ctx);
+        }
         let screen = ctx.screen_rect();
         Area::new(Id::new("resize-grip")).fixed_pos(screen.max - vec2(16.0, 16.0)).order(Order::Foreground).show(ctx, |ui| {
             let (r, response) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::drag());
@@ -2463,6 +2530,7 @@ impl eframe::App for TaskManager {
             }
         });
         self.dialogs(ctx);
+        self.docker.dialog(ctx);
         if let Some(path) = &self.screenshot {
             ctx.request_repaint_after(Duration::from_millis(16));
             if self.frames >= 120 && self.data.sampled > 0 && !self.screenshot_requested {
@@ -2525,7 +2593,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--help") {
-        println!("Task Manager for Linux {}\n  --demo                  Fictional data; no system actions or saved settings\n  --version               Print version\n  --screenshot <file.png>  Capture after 120 frames, then exit\n  --page <apps|processes|performance|app-history|startup-apps|users|details|services|settings>\n  --application <pid>      Open application details for a process\n  --resource <cpu|memory|disk|network|gpu>\n  --language <auto|en|pl>  Interface language\n  --low-memory             Start with reduced refresh and no graphs\n  --self-test              Check live procfs and terminate a disposable child", env!("CARGO_PKG_VERSION"));
+        println!("Task Manager for Linux {}\n  --demo                  Fictional data; no system actions or saved settings\n  --version               Print version\n  --screenshot <file.png>  Capture after 120 frames, then exit\n  --page <apps|processes|performance|app-history|startup-apps|users|details|services|docker|settings>\n  --docker-view <projects|containers|images>\n  --docker-container <id> / --docker-image <id> / --docker-project <name>\n  --application <pid>      Open application details for a process\n  --resource <cpu|memory|disk|network|gpu>\n  --language <auto|en|pl>  Interface language\n  --low-memory             Start with reduced refresh and no graphs\n  --self-test              Check live procfs and terminate a disposable child", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let arg = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).cloned();

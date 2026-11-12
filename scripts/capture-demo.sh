@@ -23,6 +23,10 @@ for page in app-history startup-apps users details services settings; do
     capture --page "$page"
 done
 capture --application 200
+for view in projects containers images; do
+    capture --page docker --docker-view "$view"
+done
+capture --page docker --docker-project workspace
 # Three seconds per view; retain enough width for readable headings on GitHub.
 ffmpeg -y -framerate 1/3 -start_number 10 -i "$out/frame-%d.png" \
     -filter_complex '[0:v]scale=1200:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse=dither=bayer' \

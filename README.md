@@ -8,9 +8,9 @@ A native Linux task manager with a Windows-inspired interface, written in Rust w
 >
 > **Uwaga: aplikacja jest eksperymentalna. Korzystasz z niej wyłącznie na własne ryzyko!** Może kończyć procesy oraz zmieniać ustawienia systemu i zainstalowane pakiety. Błędy mogą spowodować utratę danych lub zakłócić sesję. Zapisz pracę przed wykonaniem działań systemowych.
 
-[Download 0.0.2](https://github.com/damgru/linux-task-manager/releases/tag/v0.0.2) · [Report a bug](https://github.com/damgru/linux-task-manager/issues) · [Contribute](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+[Download 0.0.3](https://github.com/damgru/linux-task-manager/releases/tag/v0.0.3) · [Report a bug](https://github.com/damgru/linux-task-manager/issues) · [Contribute](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
-![Animated tour: Apps, Processes, CPU, Memory, Disk, Network, GPU, App history, Startup apps, Users, Details, Services, Settings and Application details — fictional demonstration data](https://github.com/damgru/linux-task-manager/releases/download/v0.0.2/demo-tour.gif)
+![Animated tour: Apps, Processes, CPU, Memory, Disk, Network, GPU, App history, Startup apps, Users, Details, Services, Settings, Application details and Docker — fictional demonstration data](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/demo-tour.gif)
 
 All public screenshots use `--demo`: process names, users, hardware and readings are fictional. Normal operation reads your Linux system. Generated media are release attachments, not source files.
 
@@ -22,21 +22,21 @@ Interfejs obsługuje **język polski i angielski**. Język jest wykrywany na pod
 
 ## Download and run
 
-Version **0.0.2** provides **Linux x86_64** packages. It requires Linux 5.3+, glibc 2.36+ (Debian 12 / Ubuntu 24.04 or newer), X11 or Wayland, and an OpenGL-capable driver. No macOS or Windows builds are published. ARM64 is not yet validated.
+Version **0.0.3** provides **Linux x86_64** packages. It requires Linux 5.3+, glibc 2.36+ (Debian 12 / Ubuntu 24.04 or newer), X11 or Wayland, and an OpenGL-capable driver. No macOS or Windows builds are published. ARM64 is not yet validated.
 
 | Package | Install / run |
 | --- | --- |
-| [Debian / Ubuntu .deb](https://github.com/damgru/linux-task-manager/releases/download/v0.0.2/linux-task-manager-0.0.2-linux-x86_64.deb) | `sudo apt install ./linux-task-manager-0.0.2-linux-x86_64.deb` |
-| [AppImage](https://github.com/damgru/linux-task-manager/releases/download/v0.0.2/linux-task-manager-0.0.2-linux-x86_64.AppImage) | Mark executable, then double-click or run it |
-| [Portable tar.gz](https://github.com/damgru/linux-task-manager/releases/download/v0.0.2/linux-task-manager-0.0.2-linux-x86_64.tar.gz) | Extract and run `./linux-task-manager` |
+| [Debian / Ubuntu .deb](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/linux-task-manager-0.0.3-linux-x86_64.deb) | `sudo apt install ./linux-task-manager-0.0.3-linux-x86_64.deb` |
+| [AppImage](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/linux-task-manager-0.0.3-linux-x86_64.AppImage) | Mark executable, then double-click or run it |
+| [Portable tar.gz](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/linux-task-manager-0.0.3-linux-x86_64.tar.gz) | Extract and run `./linux-task-manager` |
 
-Verify downloads using [SHA256SUMS.txt](https://github.com/damgru/linux-task-manager/releases/download/v0.0.2/SHA256SUMS.txt):
+Verify downloads using [SHA256SUMS.txt](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/SHA256SUMS.txt):
 
 ```sh
 sha256sum -c SHA256SUMS.txt --ignore-missing
 ```
 
-Packages are unsigned. AppImage needs working FUSE mounting; if unavailable, run `./linux-task-manager-0.0.2-linux-x86_64.AppImage --appimage-extract-and-run`. It still uses your system graphics libraries and driver. The portable binary requires the same X11/Wayland/OpenGL libraries; see [runtime prerequisites](CONTRIBUTING.md#runtime-libraries).
+Packages are unsigned. AppImage needs working FUSE mounting; if unavailable, run `./linux-task-manager-0.0.3-linux-x86_64.AppImage --appimage-extract-and-run`. It still uses your system graphics libraries and driver. The portable binary requires the same X11/Wayland/OpenGL libraries; see [runtime prerequisites](CONTRIBUTING.md#runtime-libraries).
 
 Launch `linux-task-manager` from the application menu after installing the .deb. Portable and AppImage launches register a per-user menu entry on first normal startup. Run as an ordinary user; a desktop Polkit agent and `pkexec` are needed only for operations requiring administrator permissions. NVIDIA telemetry additionally uses `nvidia-smi` when available.
 
@@ -47,10 +47,11 @@ Launch `linux-task-manager` from the application menu after installing the .deb.
 - CPU/per-core graphs, memory and swap, disks, hardware/virtual network adapters, and available AMD/NVIDIA GPU counters.
 - End task, force quit, suspend/resume and lower scheduling priority, with PID reuse protection.
 - Session app history, users, XDG startup controls and system/user systemd services.
+- **Docker** Compose projects, containers and images: resource summaries, sortable/configurable tables, details, logs and confirmed lifecycle/deletion actions.
 - Persistent themes, sampling interval, language, columns, configurable footer counters and default start page; always-on-top through X11/XWayland.
 - `--low-memory`: five-second refresh, no graphs or process history, fewer software-renderer workers.
 
-![CPU graphs with fictional hardware and telemetry](https://github.com/damgru/linux-task-manager/releases/download/v0.0.2/demo-cpu.png)
+![CPU graphs with fictional hardware and telemetry](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/demo-cpu.png)
 
 The UI uses bounded histories and virtualized rows, but OpenGL driver overhead is significant: an earlier software-renderer measurement was about 157 MiB RSS in low-memory mode. This is not an htop-sized memory footprint, and real out-of-memory startup has not been validated. Unavailable counters are marked rather than inferred. Always-on-top needs X11/XWayland; pure Wayland support depends on the compositor. See [full usage and limitations](docs/usage.md).
 
@@ -63,6 +64,14 @@ Installation details show the package format and installed version when availabl
 Click a **Network** cell for a short, authorized NetHogs measurement. Install NetHogs separately; samples expire after 10 seconds and are explicitly marked. See [application details and limitations](docs/usage.md#application-details).
 
 **Szczegóły aplikacji:** kliknij dwukrotnie aplikację lub proces, aby zobaczyć zużycie zasobów, wykresy, podprocesy, proces nadrzędny oraz informacje o instalacji i dostępnych aktualizacjach. Działania systemowe mogą wymagać uwierzytelnienia Polkit.
+
+## Docker
+
+The **Docker** tab appears when the Docker CLI is available. Browse Compose projects, containers and images, search and sort tables, and double-click an item for details, resource histories and recent logs. Column order, visibility and widths are remembered. Start, stop, restart, force-stop or delete containers and project members, or delete an image, using your existing Docker permissions. Deletion always asks for confirmation; active-container removal requires explicit force approval and preserves volumes.
+
+Docker queries run in background workers against the selected context/host. CPU uses Docker's scale (100% per logical CPU); disk/network I/O counters are cumulative. Unavailable telemetry stays explicit and stale data disables actions. See [Docker usage and limitations](docs/usage.md#docker).
+
+![Docker Compose projects with fictional containers and telemetry](https://github.com/damgru/linux-task-manager/releases/download/v0.0.3/demo-docker-projects.png)
 
 ## Build and check
 
@@ -84,7 +93,7 @@ cargo run --release --locked -- --demo --language en --screenshot /tmp/demo-proc
 
 Demo mode never starts the live collector, enumerates real services/startup entries, writes preferences or registers a launcher. System-changing controls are disabled. Save media outside the checkout and attach it to a release or PR.
 
-Regenerate the complete README tour with `scripts/capture-demo.sh /tmp/ltm-demo-tour` (requires FFmpeg). It captures every page, all five Performance resource views and Application details in English demo mode, then creates `demo-tour.gif` outside the checkout.
+Regenerate the complete README tour with `scripts/capture-demo.sh /tmp/ltm-demo-tour` (requires FFmpeg). It captures every page, all five Performance resource views, Application details and Docker views in English demo mode, then creates `demo-tour.gif` outside the checkout.
 
 See [architecture](docs/architecture.md), [working rules](AGENTS.md), [roadmap](ROADMAP.md) and [security policy](SECURITY.md).
 

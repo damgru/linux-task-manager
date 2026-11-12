@@ -2,6 +2,26 @@
 
 This project uses semantic versions and records user-visible changes here. Releases are prepared manually on Linux.
 
+## Unreleased
+
+## 0.0.3 — 2026-11-12
+
+Changes since 0.0.2:
+
+- Update CLI/package version, AppStream metadata and download links to 0.0.3. Add Docker views and project details to the fictional English README tour, with media attached to the release.
+
+- Enable column sorting in Docker Projects and project/image detail container tables. Sort projects by their numeric totals and containers within each group, keeping groups together and preserving search and folding.
+
+- Add confirmed deletion of Docker containers, project members and images through the toolbar, row menu and Delete key. Require explicit force approval for active containers, preserve volumes, report Docker image protection errors and refresh inventory after operations.
+
+- Match Docker tables to Processes with resource summaries in headers, column selection, drag reordering/resizing and separate persistent container/image layouts. Show aggregate Docker CPU/RAM, writable container sizes and logical root filesystem sizes, independent of filtering and folded projects.
+
+- Add a Docker tab, shown when the Docker CLI is detected, with Compose project trees, sortable container and image lists, search and double-click detail pages.
+- Show Docker CPU, memory/limits, PIDs, cumulative disk/network I/O, writable/root filesystem sizes, image usage, layer dependencies, ports, mounts, health and lifecycle timestamps. Keep unavailable telemetry explicit.
+- Add bounded CPU/memory/disk-rate histories and recent container/project logs. Run all Docker queries/actions in background workers; pin the selected Docker context/host, use full IDs, and disable actions on stale data.
+- Start, stop, restart or force-stop one container or a project's eligible containers, with confirmations and a mandatory SIGKILL warning. Docker actions use existing user permissions without elevating the GUI.
+- Include English/Polish labels and isolated, read-only Docker demo fixtures; retain disabled histories in low-memory mode.
+
 ## 0.0.2 — 2026-11-12
 
 Changes since 0.0.1:

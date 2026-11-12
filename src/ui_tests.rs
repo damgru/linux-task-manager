@@ -3,6 +3,7 @@ fn fixture() -> TaskManager {
     let (tx, rx) = mpsc::channel();
     let process = |pid, parent, name: &str| Process { pid, parent, start: pid as u64, name: name.into(), ..Default::default() };
     TaskManager {
+        docker: docker_page::DockerView::default(),
         application: None,
         properties: None,
         metadata_busy: false,
@@ -56,7 +57,9 @@ fn render(app: &mut TaskManager, ctx: &Context, events: Vec<Event>, settings: bo
             } else {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 app.toolbar(ui);
-                if app.application.is_some() {
+                if app.page == Page::Docker {
+                    app.docker.show(ui, &app.search, &mut app.settings);
+                } else if app.application.is_some() {
                     app.application_page(ui);
                 } else {
                     app.process_table(ui, false);
@@ -84,6 +87,9 @@ fn click(app: &mut TaskManager, ctx: &Context, pos: Pos2, button: PointerButton,
 #[test]
 fn interactive_tree_columns_language_and_authorization() {
     i18n::set_language(Language::English);
+    exercise_docker();
+    exercise_docker_sorting();
+    exercise_docker_columns();
     exercise_resource_heat();
     exercise_resizing();
     exercise_footer_and_start();
@@ -572,6 +578,7 @@ fn render_resizable_page(app: &mut TaskManager, ctx: &Context, events: Vec<Event
                 Page::Startup => app.startup_table(ui),
                 Page::History => app.history_table(ui),
                 Page::Users => app.users_table(ui),
+                Page::Docker => app.docker.show(ui, &app.search, &mut app.settings),
                 _ => unreachable!(),
             });
         },
@@ -893,4 +900,255 @@ fn exercise_application_updates_parent_and_network() {
     app.network_samples.insert((11, 11), (1024.0, Instant::now() - Duration::from_secs(11)));
     app.update_data();
     assert!(app.network_samples.is_empty(), "old samples must not look like live counters");
+}
+
+fn exercise_docker_sorting() {
+    let mut app = fixture();
+    app.page = Page::Docker;
+    app.docker.installed = true;
+    let mut data = docker::fixture();
+    data.containers[4].stats.as_mut().unwrap().cpu = Some(12.0);
+    app.docker.data = Arc::new(data);
+    let ctx = Context::default();
+    render(&mut app, &ctx, vec![], false);
+    let output = render(&mut app, &ctx, vec![], false);
+    let cpu = text_position(&output, "CPU").unwrap() + vec2(8.0, 5.0);
+    let output = click(&mut app, &ctx, cpu, PointerButton::Primary, false);
+    let y = |out: &FullOutput, label: &str| text_position(out, label).unwrap().y;
+    assert!(y(&output, "analytics (2)") < y(&output, "workspace (4)"), "heading click sorts project totals numerically");
+    assert!(y(&output, "workspace-api-1") < y(&output, "workspace-cache-1"));
+    let output = click(&mut app, &ctx, cpu, PointerButton::Primary, false);
+    assert!(y(&output, "workspace (4)") < y(&output, "analytics (2)"), "second click reverses project order");
+    assert!(y(&output, "workspace-cache-1") < y(&output, "workspace-api-1"));
+    app.settings.low_memory = true;
+    for target in [docker::Target::Project("workspace".into()), docker::Target::Image(app.docker.data.images[1].id.clone())] {
+        app.docker.open(target.clone(), true);
+        // Give the details enough room for the embedded table and its interactive header.
+        let render_detail = |app: &mut TaskManager, events| {
+            ctx.run(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1800.0, 2200.0))), events, ..Default::default() }, |ctx| {
+                CentralPanel::default().show(ctx, |ui| app.docker.show(ui, "", &mut app.settings));
+            })
+        };
+        render_detail(&mut app, vec![]);
+        let output = render_detail(&mut app, vec![]);
+        let header = output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|s| match &s.shape {
+                Shape::Text(t) if t.galley.text() == "Memory" => Some(t.pos + vec2(8.0, 5.0)),
+                _ => None,
+            })
+            .unwrap();
+        render_detail(
+            &mut app,
+            vec![
+                Event::PointerMoved(header),
+                Event::PointerButton { pos: header, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            ],
+        );
+        render_detail(
+            &mut app,
+            vec![Event::PointerButton { pos: header, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }],
+        );
+        let output = render_detail(&mut app, vec![]);
+        let (first, second) =
+            if matches!(target, docker::Target::Project(_)) { ("workspace-db-1", "workspace-api-1") } else { ("workspace-db-1", "analytics-db-1") };
+        assert!(y(&output, first) < y(&output, second), "embedded container tables sort on heading clicks");
+        render_detail(
+            &mut app,
+            vec![Event::PointerButton { pos: header, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }],
+        );
+        render_detail(
+            &mut app,
+            vec![Event::PointerButton { pos: header, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }],
+        );
+        let output = render_detail(&mut app, vec![]);
+        assert!(y(&output, second) < y(&output, first), "embedded container sorting reverses");
+    }
+}
+
+fn exercise_docker() {
+    let mut app = fixture();
+    app.docker.installed = true;
+    app.docker.data = Arc::new(docker::fixture());
+    app.page = Page::Docker;
+    let ctx = Context::default();
+    render(&mut app, &ctx, vec![], false);
+    let output = render(&mut app, &ctx, vec![], false);
+    assert!(text_position(&output, "workspace (4)").is_some());
+    assert!(text_position(&output, "workspace-web-1").is_some());
+    let project = text_position(&output, "workspace (4)").unwrap();
+    let output = click(&mut app, &ctx, project + vec2(-25.0, 6.0), PointerButton::Primary, false);
+    assert!(text_position(&output, "workspace-web-1").is_none(), "project chevron folds children");
+    app.search = "workspace-web".into();
+    let output = render(&mut app, &ctx, vec![], false);
+    assert!(text_position(&output, "workspace-web-1").is_some(), "search reveals folded matches");
+    assert!(text_position(&output, "analytics (2)").is_none());
+    app.search.clear();
+    let output = render(&mut app, &ctx, vec![], false);
+    let containers = text_position(&output, "Containers (7)").unwrap() + vec2(5.0, 5.0);
+    click(&mut app, &ctx, containers, PointerButton::Primary, false);
+    assert!(app.docker.view == docker_page::View::Containers);
+    let output = render(&mut app, &ctx, vec![], false);
+    // Let earlier tab/chevron clicks expire before exercising the double click.
+    for _ in 0..40 {
+        render(&mut app, &ctx, vec![], false);
+    }
+    let row = text_position(&output, "workspace-api-1").unwrap() + vec2(8.0, 5.0);
+    click(&mut app, &ctx, row, PointerButton::Primary, false);
+    assert_eq!(app.docker.selected, Some(docker::Target::Container(format!("{:064x}", 102))), "single click selects the row");
+    click(&mut app, &ctx, row, PointerButton::Primary, false);
+    assert_eq!(app.docker.detail, Some(docker::Target::Container(format!("{:064x}", 102))), "double click opens container details");
+    let output = render(&mut app, &ctx, vec![], false);
+    assert!(text_position(&output, "Container details").is_some());
+    assert!(text_position(&output, "Container ID").is_some());
+    assert!(text_position(&output, "Memory limit").is_some());
+    let back = text_position(&output, "<  Back").unwrap() + vec2(5.0, 5.0);
+    click(&mut app, &ctx, back, PointerButton::Primary, false);
+    assert!(app.docker.detail.is_none());
+    assert!(app.docker.view == docker_page::View::Containers);
+    app.docker.open(docker::Target::Image(app.docker.data.images[4].id.clone()), false);
+    let output = render(&mut app, &ctx, vec![], false);
+    assert!(text_position(&output, "Image details").is_some());
+    assert!(text_position(&output, "Layers").is_some());
+    app.docker.open(docker::Target::Project("workspace".into()), true);
+    let output = render(&mut app, &ctx, vec![], false);
+    assert!(text_position(&output, "Docker Compose project").is_some());
+    app.switch(Page::Processes);
+    assert!(app.docker.detail.is_none(), "leaving the Docker tab closes detail navigation");
+    let output =
+        ctx.run(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 1000.0))), ..Default::default() }, |ctx| app.sidebar(ctx));
+    assert!(text_position(&output, "Docker").is_some());
+    app.docker.installed = false;
+    let output =
+        ctx.run(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 1000.0))), ..Default::default() }, |ctx| app.sidebar(ctx));
+    assert!(text_position(&output, "Docker").is_none(), "tab hidden without Docker");
+}
+
+fn exercise_docker_columns() {
+    for (view, table, second, numeric, hidden_index) in
+        [(docker_page::View::Containers, "docker-containers", "Status", "CPU", 2), (docker_page::View::Images, "docker-images", "Usage", "Size", 2)]
+    {
+        let mut app = fixture();
+        app.page = Page::Docker;
+        app.docker.installed = true;
+        app.docker.data = Arc::new(docker::fixture());
+        app.docker.view = view;
+        let ctx = Context::default();
+        let key = format!("{table}/Name");
+        app.settings.column_widths.insert(key.clone(), 300.0);
+        render_resizable_page(&mut app, &ctx, vec![]);
+        let output = render_resizable_page(&mut app, &ctx, vec![]);
+        assert!(text_position(&output, "Total Docker CPU").is_some());
+        assert!(text_position(&output, "Total Docker memory").is_some());
+        assert!(text_position(&output, "9.0%").is_some(), "overview includes all active containers");
+        if view == docker_page::View::Containers {
+            app.search = "workspace-web".into();
+            let filtered = render_resizable_page(&mut app, &ctx, vec![]);
+            let count = filtered.shapes.iter().filter(|s| matches!(&s.shape, Shape::Text(t) if t.galley.text() == "9.0%")).count();
+            assert_eq!(count, 2, "overview and header retain the complete CPU total under search");
+            app.search.clear();
+        }
+        let name = text_position(&output, "Name").unwrap();
+        let second_before = text_position(&output, second).unwrap();
+        let edge = pos2(name.x - 9.0 + 300.0, name.y + 5.0);
+        let hover = render_resizable_page(&mut app, &ctx, vec![Event::PointerMoved(edge)]);
+        assert_eq!(hover.platform_output.cursor_icon, CursorIcon::ResizeHorizontal);
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![Event::PointerButton { pos: edge, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }],
+        );
+        let end = edge + vec2(80.0, 0.0);
+        render_resizable_page(&mut app, &ctx, vec![Event::PointerMoved(end)]);
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![Event::PointerButton { pos: end, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }],
+        );
+        let output = render_resizable_page(&mut app, &ctx, vec![]);
+        assert_eq!(app.settings.column_widths[&key], 380.0);
+        assert!(app.docker.settings_changed, "completed resize requests normal preference persistence");
+        assert!((text_position(&output, second).unwrap().x - second_before.x - 80.0).abs() < 0.1);
+        let from = text_position(&output, second).unwrap() + vec2(15.0, 6.0);
+        let to = text_position(&output, "Name").unwrap() + vec2(50.0, 5.0);
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(from),
+                Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            ],
+        );
+        render_resizable_page(&mut app, &ctx, vec![Event::PointerMoved(from - vec2(20.0, 0.0))]);
+        render_resizable_page(&mut app, &ctx, vec![Event::PointerMoved(to)]);
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }],
+        );
+        let columns = if view == docker_page::View::Images { &app.settings.docker_image_columns } else { &app.settings.docker_columns };
+        assert_eq!(columns[0], 1, "dragging headings changes the data column order");
+        let output = render_resizable_page(&mut app, &ctx, vec![]);
+        let header = text_position(&output, "Name").unwrap() + vec2(25.0, 5.0);
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(header),
+                Event::PointerButton { pos: header, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE },
+            ],
+        );
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![Event::PointerButton { pos: header, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE }],
+        );
+        let menu = render_resizable_page(&mut app, &ctx, vec![]);
+        assert!(text_position(&menu, "Select columns").is_some());
+        // Menu text is drawn after table text; choose its checkbox, not the header.
+        let check = menu
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|s| match &s.shape {
+                Shape::Text(t) if t.galley.text() == numeric => Some(t.pos + vec2(5.0, 5.0)),
+                _ => None,
+            })
+            .unwrap();
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(check),
+                Event::PointerButton { pos: check, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            ],
+        );
+        render_resizable_page(
+            &mut app,
+            &ctx,
+            vec![Event::PointerButton { pos: check, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }],
+        );
+        let columns = if view == docker_page::View::Images { &app.settings.docker_image_columns } else { &app.settings.docker_columns };
+        assert!(!columns.contains(&hidden_index), "column checkbox hides the chosen metric");
+        assert!(columns.contains(&0), "name stays available");
+        let reloaded = Settings::parse(&app.settings.serialize());
+        assert_eq!(reloaded.docker_columns, app.settings.docker_columns);
+        assert_eq!(reloaded.docker_image_columns, app.settings.docker_image_columns);
+        assert_eq!(reloaded.column_widths[&key], 380.0);
+    }
+}
+
+#[test]
+fn docker_column_preferences_validate_and_keep_independent_layouts() {
+    let settings = Settings::parse("docker_columns=Memory,Memory,invalid,CPU\ndocker_image_columns=Size,Name,Platform\ncolumn_widths=docker-containers/Memory:160|docker-images/Size:170|docker-containers/CPU:NaN\n");
+    assert_eq!(settings.docker_columns, [0, 3, 2]);
+    assert_eq!(settings.docker_image_columns, [2, 0, 7]);
+    assert_eq!(settings.column_widths.len(), 2);
+    let reloaded = Settings::parse(&settings.serialize());
+    assert_eq!(reloaded.docker_columns, settings.docker_columns);
+    assert_eq!(reloaded.docker_image_columns, settings.docker_image_columns);
+    assert_eq!(Settings::parse("docker_columns=invalid\n").docker_columns, [0]);
+    assert_eq!(Settings::parse("").docker_columns, docker_page::default_columns(false));
 }
