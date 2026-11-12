@@ -29,7 +29,7 @@ pub fn snapshot() -> Snapshot {
         (800, 0, "demo-indexer", false, 38, 0.4),
         (801, 800, "demo-index-worker", false, 22, 0.2),
     ];
-    Snapshot {
+    let mut snapshot = Snapshot {
         processes: rows
             .into_iter()
             .map(|(pid, parent, name, app, mb, cpu)| Process {
@@ -53,6 +53,7 @@ pub fn snapshot() -> Snapshot {
             })
             .collect(),
         cpu: 12.0,
+        load: Some([0.84, 0.72, 0.65]),
         cpu_name: "Demo 8-Core Processor".into(),
         cores: 8,
         mhz: 3600.0,
@@ -110,7 +111,9 @@ pub fn snapshot() -> Snapshot {
         scan_ms: 0.0,
         error: None,
         sampled: 1,
-    }
+    };
+    update_process_totals(&mut snapshot.processes);
+    snapshot
 }
 
 pub fn services() -> Vec<Service> {
@@ -139,6 +142,10 @@ pub fn startups() -> Vec<Startup> {
         .collect()
 }
 
+pub fn application_histories(cpu: f32, memory: u64, io: f32) -> [Series; 3] {
+    [series(cpu * 0.55, cpu * 0.45, 0), series(memory as f32 * 0.9, memory as f32 * 0.1, 5), series(io * 0.4, io * 0.6, 11)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +156,7 @@ mod tests {
         let data = guard.as_ref().unwrap();
         assert_eq!(data.cpu_history.len(), data.cores);
         assert_eq!(data.cpu_total.len(), HISTORY);
+        assert_eq!(data.processes[0].total_memory, (612 + 180 + 42) * 1024 * 1024);
         assert!(data.processes.iter().all(|p| p.user == "demo" && p.command.starts_with("/opt/demo/")));
         assert!(data.processes.iter().filter(|p| p.parent != 0).all(|p| data.processes.iter().any(|parent| parent.pid == p.parent)));
         assert_eq!(data.networks[0].mac, "02:00:00:00:00:01");

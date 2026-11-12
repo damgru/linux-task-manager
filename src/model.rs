@@ -43,7 +43,9 @@ pub struct Process {
     pub uid: u32,
     pub status: String,
     pub cpu: f32,
+    pub total_cpu: f32,
     pub memory: u64,
+    pub total_memory: u64,
     pub read_rate: f32,
     pub write_rate: f32,
     pub io_available: bool,
@@ -52,6 +54,61 @@ pub struct Process {
     pub nice: i32,
     pub app: bool,
     pub desktop: Option<Arc<crate::desktop::DesktopApp>>,
+}
+/// Sum CPU and RSS over the complete snapshot once per sample, independently of UI
+/// filtering/folding. Leaves propagate upward without recursion or repeated
+/// ancestry walks. Missing/reused parents and self-parent links are roots.
+pub fn update_process_totals(processes: &mut [Process]) {
+    let by_pid: HashMap<_, _> = processes.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+    let parents: Vec<_> = processes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| by_pid.get(&p.parent).copied().filter(|&parent| parent != i && processes[parent].start <= p.start))
+        .collect();
+    let mut children = vec![0usize; processes.len()];
+    for parent in parents.iter().flatten() {
+        children[*parent] += 1;
+    }
+    let mut ready = Vec::new();
+    for (i, p) in processes.iter_mut().enumerate() {
+        p.total_cpu = p.cpu;
+        p.total_memory = p.memory;
+        if children[i] == 0 {
+            ready.push(i);
+        }
+    }
+    while let Some(i) = ready.pop() {
+        if let Some(parent) = parents[i] {
+            processes[parent].total_cpu += processes[i].total_cpu;
+            processes[parent].total_memory = processes[parent].total_memory.saturating_add(processes[i].total_memory);
+            children[parent] -= 1;
+            if children[parent] == 0 {
+                ready.push(parent);
+            }
+        }
+    }
+    // Only cycles remain. Each member reaches the same processes; sum each
+    // attached branch once rather than looping or counting a member twice.
+    for i in 0..processes.len() {
+        if children[i] == 0 {
+            continue;
+        }
+        let mut cycle = Vec::new();
+        let mut next = i;
+        let mut total = 0u64;
+        let mut total_cpu = 0.0;
+        while children[next] != 0 {
+            children[next] = 0;
+            cycle.push(next);
+            total = total.saturating_add(processes[next].total_memory);
+            total_cpu += processes[next].total_cpu;
+            next = parents[next].expect("remaining nodes have a parent in a cycle");
+        }
+        for member in cycle {
+            processes[member].total_cpu = total_cpu;
+            processes[member].total_memory = total;
+        }
+    }
 }
 #[derive(Clone, Default)]
 pub struct Disk {
@@ -117,6 +174,7 @@ pub struct Gpu {
 pub struct Snapshot {
     pub processes: Vec<Process>,
     pub cpu: f32,
+    pub load: Option<[f32; 3]>,
     pub cpu_name: String,
     pub cores: usize,
     pub mhz: f32,
@@ -188,6 +246,14 @@ pub fn parse_stat(s: &str) -> Option<(String, Vec<&str>)> {
         return None;
     }
     Some((s[a + 1..b].to_owned(), fields))
+}
+fn parse_load(s: &str) -> Option<[f32; 3]> {
+    let mut fields = s.split_whitespace();
+    let mut values = [0.0; 3];
+    for value in &mut values {
+        *value = fields.next()?.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0)?;
+    }
+    Some(values)
 }
 fn io_counters(pid: u32) -> Option<(u64, u64)> {
     let t = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
@@ -282,6 +348,7 @@ impl Collector {
             }
         }
         self.cpu_previous = times;
+        self.snapshot.load = parse_load(&bounded("/proc/loadavg", 256));
         let mem = read("/proc/meminfo");
         let get = |key: &str| mem.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0) * 1024;
         self.snapshot.mem_total = get("MemTotal:");
@@ -349,7 +416,9 @@ impl Collector {
                     }
                     .into(),
                     cpu,
+                    total_cpu: 0.0,
                     memory: n(21) * self.page_size,
+                    total_memory: 0,
                     read_rate: rr,
                     write_rate: rw,
                     io_available: io.is_some(),
@@ -363,6 +432,7 @@ impl Collector {
             }
         }
         self.previous = next;
+        update_process_totals(&mut processes);
         self.snapshot.threads = processes.iter().map(|p| p.threads as u64).sum();
         self.snapshot.processes = processes;
         self.refresh_disks(elapsed);
@@ -763,6 +833,75 @@ pub fn self_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn load_averages_validate_all_three_intervals() {
+        assert_eq!(parse_load("1.25 0.84 0.65 2/400 1200\n"), Some([1.25, 0.84, 0.65]));
+        assert_eq!(parse_load("0 0 0"), Some([0.0; 3]));
+        for value in ["", "1.0 2.0", "1.0 broken 2.0", "-1 2 3", "1 NaN 3", "1 2 inf"] {
+            assert_eq!(parse_load(value), None, "unavailable or invalid load must not become a false zero: {value}");
+        }
+    }
+    fn memory_process(pid: u32, parent: u32, memory: u64) -> Process {
+        Process { pid, parent, memory, ..Default::default() }
+    }
+    #[test]
+    fn total_memory_includes_every_descendant_and_refreshes() {
+        // Deliberately unordered, with separate app and background branches.
+        let mut ps =
+            vec![memory_process(3, 2, 30), memory_process(1, 0, 10), memory_process(4, 1, 40), memory_process(2, 1, 20), memory_process(5, 99, 50)];
+        ps[1].app = true;
+        update_process_totals(&mut ps);
+        assert_eq!(ps.iter().map(|p| p.total_memory).collect::<Vec<_>>(), [30, 100, 40, 50, 50]);
+        assert_eq!(ps[1].memory, 10, "own RSS is preserved");
+        ps.remove(0);
+        ps[2].memory = 25;
+        update_process_totals(&mut ps);
+        assert_eq!(ps.iter().map(|p| p.total_memory).collect::<Vec<_>>(), [75, 40, 25, 50]);
+    }
+    #[test]
+    fn total_memory_handles_cycles_self_parents_and_overflow() {
+        let mut ps = vec![memory_process(1, 2, 10), memory_process(2, 1, 20), memory_process(3, 2, 30), memory_process(4, 4, 40)];
+        update_process_totals(&mut ps);
+        assert_eq!(ps.iter().map(|p| p.total_memory).collect::<Vec<_>>(), [60, 60, 30, 40]);
+        ps = vec![memory_process(1, 0, u64::MAX), memory_process(2, 1, 1)];
+        update_process_totals(&mut ps);
+        assert_eq!(ps[0].total_memory, u64::MAX);
+        ps[0].memory = 10;
+        ps[0].start = 100;
+        ps[1].start = 50;
+        update_process_totals(&mut ps);
+        assert_eq!(ps[0].total_memory, 10, "a reused newer parent is not attached");
+        assert_eq!(ps[1].total_memory, 1);
+    }
+    #[test]
+    fn total_cpu_includes_descendants_and_refreshes_without_changing_own_cpu() {
+        let process = |pid, parent, cpu| Process { pid, parent, cpu, ..Default::default() };
+        let mut ps = vec![process(3, 2, 3.5), process(1, 0, 1.0), process(4, 1, 4.0), process(2, 1, 2.0), process(5, 99, 5.0)];
+        update_process_totals(&mut ps);
+        assert_eq!(ps.iter().map(|p| p.total_cpu).collect::<Vec<_>>(), [3.5, 10.5, 4.0, 5.5, 5.0]);
+        assert_eq!(ps[1].cpu, 1.0);
+        ps.remove(0);
+        ps[2].cpu = 0.5;
+        update_process_totals(&mut ps);
+        assert_eq!(ps.iter().map(|p| p.total_cpu).collect::<Vec<_>>(), [5.5, 4.0, 0.5, 5.0]);
+        ps[0].start = 100;
+        ps[2].start = 50;
+        update_process_totals(&mut ps);
+        assert_eq!(ps[0].total_cpu, 1.0, "reused parent is not included");
+        let mut cycle = vec![process(1, 2, 1.0), process(2, 1, 2.0), process(3, 2, 3.0), process(4, 4, 4.0)];
+        update_process_totals(&mut cycle);
+        assert_eq!(cycle.iter().map(|p| p.total_cpu).collect::<Vec<_>>(), [6.0, 6.0, 3.0, 4.0]);
+    }
+    #[test]
+    fn total_memory_handles_deep_trees_without_recursion() {
+        let mut ps: Vec<_> = (1..=20_000).map(|pid| Process { cpu: 0.001, ..memory_process(pid, pid - 1, 1) }).collect();
+        update_process_totals(&mut ps);
+        assert_eq!(ps[0].total_memory, 20_000);
+        assert_eq!(ps[19_999].total_memory, 1);
+        assert!((ps[0].total_cpu - 20.0).abs() < 0.01);
+        assert_eq!(ps[19_999].total_cpu, 0.001);
+        update_process_totals(&mut []);
+    }
     #[test]
     fn stat_handles_parentheses() {
         let text = "123 (name with ) brackets) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22";

@@ -1,11 +1,16 @@
+mod app_details;
+mod application_page;
+mod commands;
 mod demo;
 mod desktop;
 mod gpu;
 mod integration;
 mod model;
 mod privilege;
+mod process_network;
 #[cfg(test)]
 mod ui_tests;
+mod updates;
 use privilege::{permission_denied, PrivilegedAction, ProcessAction};
 mod i18n;
 mod process_view;
@@ -68,7 +73,7 @@ impl Page {
         }
     }
     fn from(s: &str) -> Self {
-        Self::all().into_iter().find(|p| p.title().to_lowercase().replace(' ', "-") == s).unwrap_or(Self::Processes)
+        Self::all().into_iter().find(|p| p.title().to_lowercase().replace(' ', "-") == s).unwrap_or(Self::Apps)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,7 +88,9 @@ enum Resource {
 enum Sort {
     Name,
     Cpu,
+    TotalCpu,
     Memory,
+    TotalMemory,
     Disk,
     Pid,
     Parent,
@@ -94,6 +101,60 @@ enum Sort {
     Read,
     Write,
     Status,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FooterItem {
+    Processes,
+    Load,
+    Cpu,
+    Gpu,
+    Memory,
+    Swap,
+}
+impl FooterItem {
+    fn all() -> [Self; 6] {
+        [Self::Processes, Self::Load, Self::Cpu, Self::Gpu, Self::Memory, Self::Swap]
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Self::Processes => "processes",
+            Self::Load => "load",
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+            Self::Memory => "memory",
+            Self::Swap => "swap",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Processes => "Process count",
+            Self::Load => "Load",
+            Self::Cpu => "CPU",
+            Self::Gpu => "GPU",
+            Self::Memory => "Memory",
+            Self::Swap => "Swap",
+        }
+    }
+    fn value(self, data: &Snapshot) -> String {
+        match self {
+            Self::Processes => format!("{} {}", data.processes.len(), tr("Processes")),
+            Self::Load => data.load.map(|[a, b, c]| format!("Load {a:.2} / {b:.2} / {c:.2}")).unwrap_or_else(|| "Load —".into()),
+            Self::Cpu => format!("CPU {:.0}%", data.cpu),
+            Self::Gpu => data.gpus.iter().filter_map(|g| g.busy).reduce(f32::max).map(|v| format!("GPU {v:.0}%")).unwrap_or_else(|| "GPU —".into()),
+            Self::Memory => format!("{} {} / {}", tr("Memory"), bytes(data.mem_used()), bytes(data.mem_total)),
+            Self::Swap => format!("Swap {} / {}", bytes(data.swap_total.saturating_sub(data.swap_free)), bytes(data.swap_total)),
+        }
+    }
+    fn description(self) -> &'static str {
+        match self {
+            Self::Processes => "Total number of system processes",
+            Self::Load => "Linux load averages over 1, 5 and 15 minutes; not a percentage. — means not reported.",
+            Self::Gpu => "Highest reported GPU utilization. — means not reported by the driver.",
+            Self::Cpu => "CPU is shown as a percentage of total system capacity.",
+            Self::Memory => "Used / total physical memory",
+            Self::Swap => "Used / total swap; 0 KB / 0 KB means no swap is configured",
+        }
+    }
 }
 struct Settings {
     theme: String,
@@ -107,12 +168,14 @@ struct Settings {
     columns: Vec<Column>,
     detail_columns: Vec<Column>,
     hide_virtual_networks: bool,
+    footer: Vec<FooterItem>,
+    column_widths: HashMap<String, f32>,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "Dark".into(),
-            start: Page::Processes,
+            start: Page::Apps,
             interval: 1000,
             always_top: false,
             low_memory: false,
@@ -122,6 +185,8 @@ impl Default for Settings {
             columns: Column::defaults(),
             detail_columns: Column::details(),
             hide_virtual_networks: false,
+            footer: vec![FooterItem::Processes, FooterItem::Cpu, FooterItem::Memory],
+            column_widths: HashMap::new(),
         }
     }
 }
@@ -130,26 +195,51 @@ impl Settings {
         if demo::enabled() {
             return Self::default();
         }
+        fs::read_to_string(config_dir().join("linux-task-manager/settings")).map(|text| Self::parse(&text)).unwrap_or_default()
+    }
+    fn parse(text: &str) -> Self {
         let mut s = Self::default();
-        if let Ok(text) = fs::read_to_string(config_dir().join("linux-task-manager/settings")) {
-            for l in text.lines() {
-                if let Some((k, v)) = l.split_once('=') {
-                    match k {
-                        "theme" => s.theme = v.into(),
-                        "start" => s.start = Page::from(v),
-                        "interval" => s.interval = v.parse().unwrap_or(1000),
-                        "top" => s.always_top = v == "true",
-                        "low" => s.low_memory = v == "true",
-                        "confirm" => s.confirm = v == "true",
-                        "language" => s.language = Language::from(v),
-                        "hide_virtual_networks" => s.hide_virtual_networks = v == "true",
-                        "tree" => s.tree = v != "false",
-                        "detail_columns" => s.detail_columns = Column::parse_list(v),
-                        "columns" => s.columns = Column::parse_list(v),
-                        _ => {}
+        let mut columns_version = 1;
+        for l in text.lines() {
+            if let Some((k, v)) = l.split_once('=') {
+                match k {
+                    "theme" => s.theme = v.into(),
+                    "start" => s.start = Page::from(v),
+                    "interval" => s.interval = v.parse().unwrap_or(1000),
+                    "top" => s.always_top = v == "true",
+                    "low" => s.low_memory = v == "true",
+                    "confirm" => s.confirm = v == "true",
+                    "language" => s.language = Language::from(v),
+                    "hide_virtual_networks" => s.hide_virtual_networks = v == "true",
+                    "tree" => s.tree = v != "false",
+                    "detail_columns" => s.detail_columns = Column::parse_list(v),
+                    "columns" => s.columns = Column::parse_list(v),
+                    "columns_version" => columns_version = v.parse().unwrap_or(1),
+                    "column_widths" => {
+                        for entry in v.split('|').take(256) {
+                            if let Some((key, width)) = entry.rsplit_once(':') {
+                                if let Ok(width) = width.parse::<f32>() {
+                                    if width.is_finite() && (48.0..=2000.0).contains(&width) && key.len() <= 100 {
+                                        s.column_widths.insert(key.into(), width);
+                                    }
+                                }
+                            }
+                        }
                     }
+                    "footer" => s.footer = FooterItem::all().into_iter().filter(|item| v.split(',').any(|key| key == item.key())).collect(),
+                    _ => {}
                 }
             }
+        }
+        // Show the new column once for existing installations, then respect
+        // subsequent hide/reorder choices saved by this version.
+        if columns_version < 2 && !s.columns.contains(&Column::TotalMemory) {
+            let index = s.columns.iter().position(|c| *c == Column::Memory).map_or(s.columns.len(), |i| i + 1);
+            s.columns.insert(index, Column::TotalMemory);
+        }
+        if columns_version < 3 && !s.columns.contains(&Column::TotalCpu) {
+            let index = s.columns.iter().position(|c| *c == Column::Cpu).map_or(s.columns.len(), |i| i + 1);
+            s.columns.insert(index, Column::TotalCpu);
         }
         s
     }
@@ -159,10 +249,13 @@ impl Settings {
         }
         let d = config_dir().join("linux-task-manager");
         fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        fs::write(
-            d.join("settings"),
-            format!(
-                "theme={}\nstart={}\ninterval={}\ntop={}\nlow={}\nconfirm={}\nlanguage={}\ntree={}\ncolumns={}\ndetail_columns={}\nhide_virtual_networks={}\n",
+        fs::write(d.join("settings"), self.serialize()).map_err(|e| e.to_string())
+    }
+    fn serialize(&self) -> String {
+        let mut widths: Vec<_> = self.column_widths.iter().collect();
+        widths.sort_by(|a, b| a.0.cmp(b.0));
+        format!(
+                "theme={}\nstart={}\ninterval={}\ntop={}\nlow={}\nconfirm={}\nlanguage={}\ntree={}\ncolumns={}\ndetail_columns={}\nhide_virtual_networks={}\ncolumns_version=3\nfooter={}\ncolumn_widths={}\n",
                 self.theme,
                 self.start.title().to_lowercase().replace(' ', "-"),
                 self.interval,
@@ -173,10 +266,10 @@ impl Settings {
                 self.tree,
                 self.columns.iter().map(|c| c.key()).collect::<Vec<_>>().join(","),
                 self.detail_columns.iter().map(|c| c.key()).collect::<Vec<_>>().join(","),
-                self.hide_virtual_networks
-            ),
+                self.hide_virtual_networks,
+                self.footer.iter().map(|item| item.key()).collect::<Vec<_>>().join(","),
+                widths.iter().map(|(key, width)| format!("{key}:{width}")).collect::<Vec<_>>().join("|")
         )
-        .map_err(|e| e.to_string())
     }
 }
 #[derive(Clone)]
@@ -190,12 +283,21 @@ struct HistoryRow {
     last_seen: Instant,
 }
 enum Worker {
+    Application((u32, u64), app_details::Metadata),
+    UpdateCheck((u32, u64), Result<Option<updates::Available>, String>),
+    Updated((u32, u64), Result<(), String>),
+    Network((u32, u64), Result<f32, String>),
     Services(Vec<Service>, String),
     Startups(Vec<Startup>),
     Action(Result<(), String>),
     Authorize(PrivilegedAction),
 }
 struct TaskManager {
+    application: Option<application_page::ApplicationView>,
+    properties: Option<Process>,
+    metadata_busy: bool,
+    network_samples: HashMap<(u32, u64), (f32, Instant)>,
+    application_request: Option<u32>,
     monitor: Monitor,
     data: Arc<Snapshot>,
     page: Page,
@@ -230,6 +332,42 @@ struct TaskManager {
     expanded_apps: HashSet<(u32, u64)>,
     authorization: Option<PrivilegedAction>,
     app_icons: HashMap<String, TextureHandle>,
+}
+fn button_feedback(ui: &Ui, response: &Response) -> Shape {
+    let enabled = response.enabled();
+    let hovered = enabled && (response.hovered() || response.has_focus());
+    let hover = ui.ctx().animate_bool_with_time(response.id.with("hover-fill"), hovered, 0.12);
+    let pressed = enabled && response.is_pointer_button_down_on();
+    let press = ui.ctx().animate_bool_with_time(response.id.with("press-fill"), pressed, 0.06);
+    let color = if ui.visuals().dark_mode { Color32::WHITE } else { Color32::BLACK };
+    Shape::rect_filled(response.rect, 4.0, color.gamma_multiply(if enabled { 0.09 * hover + 0.10 * press } else { 0.0 }))
+}
+fn quiet_button(label: &str) -> impl Widget + '_ {
+    move |ui: &mut Ui| {
+        let background = ui.painter().add(Shape::Noop);
+        let response = ui.add(Button::new(label).frame(false)).on_hover_cursor(CursorIcon::PointingHand);
+        ui.painter().set(background, button_feedback(ui, &response));
+        response
+    }
+}
+// The edge owns resizing; the rest of a heading remains available for sorting/reordering.
+fn column_resize(ui: &Ui, table: &str, key: &str, rect: Rect, width: f32) -> Option<(f32, bool)> {
+    let id = ui.id().with(("column-resize", table, key));
+    let edge = Rect::from_center_size(pos2(rect.right(), rect.center().y), vec2(8.0, rect.height()));
+    let response = ui.interact(edge, id, Sense::click_and_drag()).on_hover_cursor(CursorIcon::ResizeHorizontal);
+    if response.hovered() || response.dragged() {
+        ui.painter().vline(rect.right(), rect.y_range(), Stroke::new(2.0, ACCENT));
+    }
+    if response.drag_started() {
+        let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(rect.right_center());
+        ui.ctx().data_mut(|data| data.insert_temp(id, (width, origin.x)));
+    }
+    if response.dragged() || response.drag_stopped() {
+        let (start, origin) = ui.ctx().data(|data| data.get_temp::<(f32, f32)>(id)).unwrap_or((width, rect.right()));
+        let pointer = ui.input(|i| i.pointer.interact_pos()).map_or(origin, |p| p.x);
+        return Some(((start + pointer - origin).clamp(48.0, 2000.0), response.drag_stopped()));
+    }
+    None
 }
 fn bg(ctx: &Context) -> Color32 {
     if ctx.style().visuals.dark_mode {
@@ -285,6 +423,29 @@ fn cell(ui: &Ui, rect: Rect, t: impl Into<String>, right: bool, color: Color32, 
         FontId::proportional(size),
         color,
     );
+}
+fn resource_heat(column: Column, process: &Process, mem_total: u64, dark: bool) -> Option<Color32> {
+    // Use fixed resource thresholds so idle cells stay neutral even when they
+    // happen to be the busiest in a quiet system. Unknown readings have no heat.
+    let (value, threshold, high) = match column {
+        Column::Cpu => (process.cpu, 5.0, 50.0),
+        Column::TotalCpu => (process.total_cpu, 5.0, 50.0),
+        Column::Memory | Column::TotalMemory if mem_total > 0 => {
+            let memory = if column == Column::Memory { process.memory } else { process.total_memory };
+            (memory as f32 / mem_total as f32 * 100.0, 5.0, 25.0)
+        }
+        Column::Disk if process.io_available => ((process.read_rate + process.write_rate) / 1_048_576.0, 1.0, 10.0),
+        _ => return None,
+    };
+    if !value.is_finite() || value <= threshold {
+        return None;
+    }
+    let strength = ((value - threshold) / (high - threshold)).clamp(0.0, 1.0);
+    Some(if dark {
+        Color32::from_rgb((62.0 + strength * 78.0) as u8, 23, 22)
+    } else {
+        Color32::from_rgb(255, (239.0 - strength * 65.0) as u8, (232.0 - strength * 65.0) as u8)
+    })
 }
 fn icon(p: &Painter, c: Pos2, kind: usize, color: Color32) {
     let st = Stroke::new(1.4, color);
@@ -427,6 +588,11 @@ impl TaskManager {
         monitor.interval.store(if settings.low_memory { 5000 } else { settings.interval }, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         Self {
+            application: None,
+            properties: None,
+            metadata_busy: false,
+            network_samples: HashMap::new(),
+            application_request: std::env::args().skip_while(|a| a != "--application").nth(1).and_then(|a| a.parse().ok()),
             monitor,
             data: Arc::new(Snapshot::default()),
             page: page.unwrap_or(settings.start),
@@ -468,6 +634,8 @@ impl TaskManager {
         self.message = Some((tr(&message).into(), error, Instant::now()));
     }
     fn switch(&mut self, page: Page) {
+        self.application = None;
+        self.properties = None;
         if self.page != page {
             self.selected = None;
         }
@@ -569,11 +737,58 @@ impl TaskManager {
                         data.gpus.iter().position(|g| g.busy.is_some()).or_else(|| data.gpus.iter().position(|g| g.nvidia)).unwrap_or(0),
                     );
                 }
+                if let Some(application) = &mut self.application {
+                    application.refresh(&data, self.settings.low_memory);
+                }
                 self.data = data;
             }
         }
+        self.network_samples
+            .retain(|key, (_, at)| at.elapsed() < Duration::from_secs(10) && self.data.processes.iter().any(|p| (p.pid, p.start) == *key));
         while let Ok(result) = self.rx.try_recv() {
             match result {
+                Worker::UpdateCheck(key, result) => {
+                    if let Some(view) = self.application.as_mut().filter(|a| a.key() == key) {
+                        view.update = match result {
+                            Ok(Some(available)) => application_page::UpdateState::Available(available),
+                            Ok(None) => application_page::UpdateState::Current,
+                            Err(e) => application_page::UpdateState::Error(e),
+                        };
+                    }
+                }
+                Worker::Updated(key, result) => {
+                    self.busy = false;
+                    if let Some(view) = self.application.as_mut().filter(|a| a.key() == key) {
+                        view.update = match &result {
+                            Ok(()) => {
+                                view.metadata = None;
+                                application_page::UpdateState::Idle
+                            }
+                            Err(e) => application_page::UpdateState::Error(e.clone()),
+                        };
+                    }
+                    match result {
+                        Ok(()) => self.notify("Update completed. Restart the application to use the installed version.", false),
+                        Err(e) => self.notify(e, true),
+                    }
+                }
+                Worker::Network(key, result) => {
+                    self.busy = false;
+                    match result {
+                        Ok(rate) if rate.is_finite() && rate >= 0.0 && self.data.processes.iter().any(|p| (p.pid, p.start) == key) => {
+                            self.network_samples.insert(key, (rate, Instant::now()));
+                            self.notify("Network sample captured. The reading is shown for 10 seconds; click again to measure.", false);
+                        }
+                        Ok(_) => self.notify("The process exited or changed. Select it again.", true),
+                        Err(e) => self.notify(e, true),
+                    }
+                }
+                Worker::Application(key, metadata) => {
+                    self.metadata_busy = false;
+                    if let Some(application) = self.application.as_mut().filter(|a| a.key() == key) {
+                        application.metadata = Some(metadata);
+                    }
+                }
                 Worker::Services(s, e) => {
                     let selected = self.service_selected.and_then(|i| self.services.get(i)).map(|s| (s.name.clone(), s.scope.clone()));
                     self.services = s;
@@ -659,7 +874,8 @@ impl TaskManager {
             for (i, label) in ["—", "□", "×"].iter().enumerate() {
                 let br = Rect::from_min_size(pos2(r.right() - 138.0 + i as f32 * 46.0, r.top()), vec2(46.0, 44.0));
                 let resp = ui.interact(br, ui.id().with(("window", i)), Sense::click());
-                if resp.hovered() {
+                ui.painter().add(button_feedback(ui, &resp));
+                if i == 2 && resp.hovered() {
                     ui.painter().rect_filled(br, 0.0, if i == 2 { Color32::from_rgb(175, 45, 45) } else { card(ctx) });
                 }
                 ui.painter().text(br.center(), Align2::CENTER_CENTER, label, FontId::proportional(if i == 2 { 23.0 } else { 18.0 }), fg(ctx));
@@ -681,6 +897,8 @@ impl TaskManager {
             .frame(Frame::NONE.fill(shell(ctx)).inner_margin(Margin::symmetric(6, 10)))
             .show(ctx, |ui| {
                 let r = ui.allocate_rect(Rect::from_min_size(ui.cursor().min, vec2(width - 12.0, 38.0)), Sense::click());
+                ui.painter().add(button_feedback(ui, &r));
+                r.clone().on_hover_cursor(CursorIcon::PointingHand);
                 icon(ui.painter(), r.rect.min + vec2(24.0, 19.0), 8, muted(ctx));
                 if r.clicked() {
                     self.collapsed = !self.collapsed;
@@ -703,6 +921,8 @@ impl TaskManager {
         if active {
             ui.painter().rect_filled(Rect::from_min_size(pos2(r.left(), r.center().y - 9.0), vec2(3.0, 18.0)), 2.0, ACCENT);
         }
+        ui.painter().add(button_feedback(ui, &resp));
+        resp.clone().on_hover_cursor(CursorIcon::PointingHand);
         icon(ui.painter(), pos2(r.left() + 24.0, r.center().y), page.icon(), fg(ui.ctx()));
         if !self.collapsed && width > 100.0 {
             text(ui.painter(), pos2(r.left() + 52.0, r.center().y), page.title(), 15.0, fg(ui.ctx()));
@@ -712,6 +932,10 @@ impl TaskManager {
         }
     }
     fn toolbar(&mut self, ui: &mut Ui) {
+        if self.application.is_some() {
+            self.application_toolbar(ui);
+            return;
+        }
         let ctx = ui.ctx().clone();
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 58.0), Sense::hover());
         text(ui.painter(), pos2(r.left() + 20.0, r.center().y), self.page.title(), 17.0, fg(&ctx));
@@ -762,11 +986,11 @@ impl TaskManager {
                             self.apply_settings(&ctx);
                         }
                     }
-                    if ui.add_enabled(self.selected_process().is_some() && !demo::enabled(), Button::new(tr("End task")).frame(false)).clicked() {
+                    if ui.add_enabled(self.selected_process().is_some() && !demo::enabled(), quiet_button(tr("End task"))).clicked() {
                         self.ask_end();
                     }
                     if ui
-                        .add_enabled(self.selected_process().is_some() && !demo::enabled(), Button::new(tr("Efficiency mode")).frame(false))
+                        .add_enabled(self.selected_process().is_some() && !demo::enabled(), quiet_button(tr("Efficiency mode")))
                         .on_hover_text(tr("Reduce scheduling priority (nice +10)"))
                         .clicked()
                     {
@@ -777,10 +1001,7 @@ impl TaskManager {
                 }
                 Page::Services => {
                     for (label, action) in [("↻  Restart", "restart"), ("□  Stop", "stop"), ("▷  Start", "start")] {
-                        if ui
-                            .add_enabled(self.service_selected.is_some() && !self.busy && !demo::enabled(), Button::new(tr(label)).frame(false))
-                            .clicked()
-                        {
+                        if ui.add_enabled(self.service_selected.is_some() && !self.busy && !demo::enabled(), quiet_button(tr(label))).clicked() {
                             if let Some(s) = self.service_selected.and_then(|i| self.services.get(i)).cloned() {
                                 self.busy = true;
                                 let tx = self.tx.clone();
@@ -799,8 +1020,7 @@ impl TaskManager {
                     }
                 }
                 Page::Startup => {
-                    if ui.add_enabled(self.startup_selected.is_some() && !demo::enabled(), Button::new(tr("Enable / disable")).frame(false)).clicked()
-                    {
+                    if ui.add_enabled(self.startup_selected.is_some() && !demo::enabled(), quiet_button(tr("Enable / disable"))).clicked() {
                         if let Some(s) = self.startup_selected.and_then(|i| self.startups.get(i)).cloned() {
                             let tx = self.tx.clone();
                             std::thread::spawn(move || {
@@ -817,36 +1037,41 @@ impl TaskManager {
                 }
                 _ => {}
             }
-            if self.page != Page::Settings && ui.add_enabled(!demo::enabled(), Button::new(tr("⊞  Run new task")).frame(false)).clicked() {
+            if self.page != Page::Settings && ui.add_enabled(!demo::enabled(), quiet_button(tr("⊞  Run new task"))).clicked() {
                 self.run_dialog = true;
             }
         }
     }
     fn statusbar(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("status").exact_height(30.0).frame(Frame::NONE.fill(bg(ctx))).show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(14.0);
-                ui.label(RichText::new(format!("{} {}", self.data.processes.len(), tr("Processes"))).size(12.0).color(muted(ctx)));
-                ui.separator();
-                ui.label(RichText::new(format!("CPU {:.0}%", self.data.cpu)).size(12.0).color(muted(ctx)));
-                ui.separator();
-                ui.label(
-                    RichText::new(format!("{} {} / {}", tr("Memory"), bytes(self.data.mem_used()), bytes(self.data.mem_total)))
-                        .size(12.0)
-                        .color(muted(ctx)),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(14.0);
-                    let t = if demo::enabled() {
-                        "Demo · fictional data".into()
-                    } else if self.settings.interval == 0 {
-                        "Updates paused".into()
-                    } else if self.settings.low_memory {
-                        "Low memory mode · 5 s".into()
-                    } else {
-                        format!("{} · {:.1} s", tr("Live"), self.settings.interval as f32 / 1000.0)
-                    };
-                    ui.label(RichText::new(tr(&t)).size(12.0).color(muted(ctx)));
+                let t = if demo::enabled() {
+                    "Demo · fictional data".into()
+                } else if self.settings.interval == 0 {
+                    "Updates paused".into()
+                } else if self.settings.low_memory {
+                    "Low memory mode · 5 s".into()
+                } else {
+                    format!("{} · {:.1} s", tr("Live"), self.settings.interval as f32 / 1000.0)
+                };
+                ui.label(RichText::new(tr(&t)).size(12.0).color(muted(ctx)));
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ScrollArea::horizontal().id_salt("footer-metrics").scroll_bar_visibility(scroll_area::ScrollBarVisibility::AlwaysHidden).show(
+                        ui,
+                        |ui| {
+                            ui.horizontal_centered(|ui| {
+                                ui.add_space(14.0);
+                                for (index, item) in FooterItem::all().into_iter().filter(|item| self.settings.footer.contains(item)).enumerate() {
+                                    if index > 0 {
+                                        ui.separator();
+                                    }
+                                    ui.label(RichText::new(item.value(&self.data)).size(12.0).color(muted(ctx)))
+                                        .on_hover_text(tr(item.description()));
+                                }
+                            });
+                        },
+                    );
                 });
             });
         });
@@ -856,7 +1081,7 @@ impl TaskManager {
         ui.separator();
         let columns = if details { &mut self.settings.detail_columns } else { &mut self.settings.columns };
         let mut changed = false;
-        ui.label(RichText::new(tr("Drag column headings to reorder.")).small());
+        ui.label(RichText::new(tr("Drag column headings to reorder; drag their edges to resize.")).small());
         ScrollArea::vertical().max_height(540.0).show(ui, |ui| {
             let mut menu_order = columns.clone();
             menu_order.extend(Column::all().into_iter().filter(|c| !columns.contains(c)));
@@ -889,6 +1114,8 @@ impl TaskManager {
         ui.separator();
         if ui.button(tr("Reset columns")).clicked() {
             *columns = if details { Column::details() } else { Column::defaults() };
+            let prefix = if details { "details/" } else { "process/" };
+            self.settings.column_widths.retain(|key, _| !key.starts_with(prefix));
             changed = true;
         }
         ui.label(RichText::new(tr("Unavailable counters are shown as —.")).small());
@@ -917,7 +1144,9 @@ impl TaskManager {
             let c = match self.sort {
                 Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 Sort::Cpu => a.cpu.total_cmp(&b.cpu),
+                Sort::TotalCpu => a.total_cpu.total_cmp(&b.total_cpu),
                 Sort::Memory => a.memory.cmp(&b.memory),
+                Sort::TotalMemory => a.total_memory.cmp(&b.total_memory),
                 Sort::Disk => (a.read_rate + a.write_rate).total_cmp(&(b.read_rate + b.write_rate)),
                 Sort::Pid => a.pid.cmp(&b.pid),
                 Sort::Parent => a.parent.cmp(&b.parent),
@@ -956,9 +1185,16 @@ impl TaskManager {
         let rows = process_view::display_rows(&data.processes, &order, &matching, folded, !query.is_empty(), tree, view);
         ui.spacing_mut().item_spacing.y = 0.0;
         let columns = if details { self.settings.detail_columns.clone() } else { self.settings.columns.clone() };
-        let base_width: f32 = columns.iter().map(|c| c.width()).sum();
-        let width = ui.available_width().max(base_width);
-        let widths: Vec<f32> = columns.iter().map(|c| c.width() + if *c == Column::Name { width - base_width } else { 0.0 }).collect();
+        let table = if details { "details" } else { "process" };
+        let mut widths: Vec<f32> = columns.iter().map(|c| self.column_width(table, c.key(), c.width())).collect();
+        let extra = (ui.available_width() - widths.iter().sum::<f32>()).max(0.0);
+        if !self.settings.column_widths.contains_key(&format!("{table}/Name")) {
+            if let Some(i) = columns.iter().position(|c| *c == Column::Name) {
+                widths[i] += extra;
+            }
+        }
+        let width = widths.iter().sum::<f32>();
+        let mut resize = None;
         let mut reorder = None;
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
         ScrollArea::horizontal()
@@ -978,8 +1214,8 @@ impl TaskManager {
                     }
                     if !details {
                         let total = match column {
-                            Column::Cpu => format!("{:.0}%", data.cpu),
-                            Column::Memory => format!("{:.0}%", data.mem_percent()),
+                            Column::Cpu | Column::TotalCpu => format!("{:.0}%", data.cpu),
+                            Column::Memory | Column::TotalMemory => format!("{:.0}%", data.mem_percent()),
                             Column::Disk => format!("{:.0}%", data.disks.iter().map(|d| d.busy).fold(0.0, f32::max)),
                             Column::Gpu => data.gpus.iter().filter_map(|g| g.busy).reduce(f32::max).map(|v| format!("{v:.0}%")).unwrap_or_default(),
                             _ => String::new(),
@@ -1003,7 +1239,11 @@ impl TaskManager {
                         muted(ui.ctx()),
                         14.0,
                     );
-                    let resp = ui.interact(r, ui.id().with(("sort", column)), Sense::click_and_drag());
+                    let body = Rect::from_min_max(r.min + vec2(4.0, 0.0), r.max - vec2(4.0, 0.0));
+                    let resp = ui.interact(body, ui.id().with(("sort", column)), Sense::click_and_drag());
+                    if let Some(change) = column_resize(ui, table, column.key(), r, widths[i]) {
+                        resize = Some((column.key(), change));
+                    }
                     resp.dnd_set_drag_payload(column);
                     if let Some(source) = resp.dnd_hover_payload::<Column>() {
                         if *source != column {
@@ -1015,7 +1255,13 @@ impl TaskManager {
                             reorder = Some((*source, column));
                         }
                     }
-                    resp.clone().on_hover_text(tr("Drag to move · Click to sort · Right-click for columns"));
+                    resp.clone().on_hover_text(tr(if column == Column::TotalCpu {
+                        "CPU of this process and all descendants, including hidden ones, as a percentage of total system capacity. Click to sort; right-click for columns."
+                    } else if column == Column::TotalMemory {
+                        "RSS of this process and all descendants, including hidden ones. Shared pages can be counted more than once. Click to sort; right-click for columns."
+                    } else {
+                        "Drag edges to resize · Drag to move · Click to sort · Right-click for columns"
+                    }));
                     if resp.clicked() {
                         if let Some(sort) = column.sort() {
                             self.descending = if self.sort == sort { !self.descending } else { sort != Sort::Name };
@@ -1064,20 +1310,8 @@ impl TaskManager {
                         let mut toggled = false;
                         for (i, &column) in columns.iter().enumerate() {
                             let cr = Rect::from_min_size(pos2(x, r.top()), vec2(widths[i], row_h));
-                            let strength = match column {
-                                Column::Cpu => Some(p.cpu / 25.0),
-                                Column::Memory => Some(p.memory as f32 / data.mem_total.max(1) as f32 * 12.0),
-                                Column::Disk => Some((p.read_rate + p.write_rate) / 10_000_000.0),
-                                _ => None,
-                            };
                             if !details && !selected {
-                                if let Some(strength) = strength {
-                                    let strength = strength.clamp(0.0, 1.0);
-                                    let heat = if ui.visuals().dark_mode {
-                                        Color32::from_rgb((62.0 + strength * 78.0) as u8, 23, 22)
-                                    } else {
-                                        Color32::from_rgb(255, (239.0 - strength * 65.0) as u8, (232.0 - strength * 65.0) as u8)
-                                    };
+                                if let Some(heat) = resource_heat(column, p, data.mem_total, ui.visuals().dark_mode) {
                                     ui.painter().rect_filled(cr, 0.0, heat);
                                 }
                             }
@@ -1088,6 +1322,8 @@ impl TaskManager {
                                 if tree && has_children {
                                     let ar = Rect::from_min_size(pos2(left, r.top()), vec2(19.0, row_h));
                                     let arrow = ui.interact(ar, ui.id().with(("fold", key)), Sense::click());
+                                    ui.painter().add(button_feedback(ui, &arrow));
+                                    arrow.clone().on_hover_cursor(CursorIcon::PointingHand);
                                     let center = ar.center();
                                     let is_folded = if view == process_view::View::Apps {
                                         !self.expanded_apps.contains(&key)
@@ -1147,7 +1383,9 @@ impl TaskManager {
                                     })
                                     .into(),
                                     Column::Cpu => format!("{:.1}%", p.cpu),
+                                    Column::TotalCpu => format!("{:.1}%", p.total_cpu),
                                     Column::Memory => bytes(p.memory),
+                                    Column::TotalMemory => bytes(p.total_memory),
                                     Column::Disk => {
                                         if p.io_available {
                                             rate(p.read_rate + p.write_rate)
@@ -1169,6 +1407,7 @@ impl TaskManager {
                                             "—".into()
                                         }
                                     }
+                                    Column::Network => self.network_samples.get(&key).map(|(value, _)| format!("{} *", rate(*value))).unwrap_or_else(|| "—".into()),
                                     Column::Pid => p.pid.to_string(),
                                     Column::Parent => p.parent.to_string(),
                                     Column::User => p.user.clone(),
@@ -1185,7 +1424,16 @@ impl TaskManager {
                                     if column == Column::Status && p.nice >= 10 { GREEN } else { fg(ui.ctx()) },
                                     14.0,
                                 );
-                                if matches!(column, Column::Gpu | Column::GpuEngine | Column::Power | Column::Network)
+                                if column == Column::Network {
+                                    let response = ui.interact(cr, ui.id().with(("network-read", key)), Sense::click());
+                                    let response = response.on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text(tr("Click to authenticate and measure this process with NetHogs. * = last authorized sample, shown for 10 seconds."));
+                                    if response.clicked() && !demo::enabled() && !self.busy {
+                                        self.authorization = Some(process_network::request(p));
+                                        toggled = true;
+                                    }
+                                }
+                                if matches!(column, Column::Gpu | Column::GpuEngine | Column::Power)
                                     || (!p.io_available && matches!(column, Column::Disk | Column::Read | Column::Write))
                                 {
                                     ui.interact(cr, ui.id().with(("unavailable", key, i)), Sense::hover())
@@ -1197,6 +1445,7 @@ impl TaskManager {
                             }
                             x += widths[i];
                         }
+                        if resp.double_clicked() && !toggled { self.open_application(p.clone()); }
                         if resp.clicked() && !toggled {
                             self.selected = Some(key);
                         }
@@ -1212,6 +1461,8 @@ impl TaskManager {
                         resp.context_menu(|ui| {
                             ui.label(RichText::new(format!("{} · {}", p.name, p.pid)).strong());
                             ui.separator();
+                            if ui.button(tr("Application details")).clicked() { self.open_application(p.clone()); ui.close_menu(); }
+                            if ui.button(tr("Properties")).clicked() { self.properties = Some(p.clone()); ui.close_menu(); }
                             if ui.button(tr("End task…")).clicked() {
                                 self.selected = Some(key);
                                 self.ask_end();
@@ -1238,6 +1489,13 @@ impl TaskManager {
                     }
                 });
             });
+        if let Some((key, (width, finished))) = resize {
+            self.settings.column_widths.insert(format!("{table}/{key}"), width);
+            ui.ctx().request_repaint();
+            if finished {
+                self.apply_settings(ui.ctx());
+            }
+        }
         if let Some((source, target)) = reorder {
             let columns = if details { &mut self.settings.detail_columns } else { &mut self.settings.columns };
             process_view::move_column(columns, source, target);
@@ -1601,28 +1859,54 @@ impl TaskManager {
             });
         });
     }
-    fn simple_table<F>(&self, ui: &mut Ui, id: &str, headers: &[(&str, f32)], count: usize, mut draw: F)
+    fn column_width(&self, table: &str, key: &str, default: f32) -> f32 {
+        self.settings.column_widths.get(&format!("{table}/{key}")).copied().unwrap_or(default)
+    }
+    fn simple_table<F>(&self, ui: &mut Ui, id: &str, headers: &[(&str, f32)], count: usize, mut draw: F) -> Option<(String, (f32, bool))>
     where
-        F: FnMut(&mut Ui, usize, Rect),
+        F: FnMut(&mut Ui, usize, Rect, &[Rect]),
     {
-        let width = ui.available_width();
-        let (r, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-        let mut x = r.left();
-        for (h, f) in headers {
-            let c = Rect::from_min_size(pos2(x, r.top()), vec2(width * f, 36.0));
-            cell(ui, c, *h, false, muted(ui.ctx()), 14.0);
-            if x > r.left() {
-                ui.painter().vline(x, r.y_range(), Stroke::new(1.0, line(ui.ctx())));
+        let available = ui.available_width();
+        let widths: Vec<_> = headers.iter().map(|(key, fraction)| self.column_width(id, key, (available * fraction).max(48.0))).collect();
+        let width = widths.iter().sum::<f32>();
+        let mut resize = None;
+        ScrollArea::horizontal().id_salt((id, "horizontal")).auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_min_width(width);
+            let (r, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+            let mut x = r.left();
+            for ((key, _), &w) in headers.iter().zip(&widths) {
+                let c = Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height()));
+                cell(ui, c, *key, false, muted(ui.ctx()), 14.0);
+                ui.painter().vline(c.right(), r.y_range(), Stroke::new(1.0, line(ui.ctx())));
+                if let Some(change) = column_resize(ui, id, key, c, w) {
+                    resize = Some((*key, change));
+                }
+                x += w;
             }
-            x += width * f;
-        }
-        ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, line(ui.ctx())));
-        ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows(ui, 31.0, count, |ui, range| {
-            for i in range {
-                let (r, _) = ui.allocate_exact_size(vec2(width, 31.0), Sense::hover());
-                draw(ui, i, r);
-            }
+            ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, line(ui.ctx())));
+            ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows(ui, 31.0, count, |ui, range| {
+                let mut cells = vec![Rect::NOTHING; widths.len()];
+                for i in range {
+                    let (r, _) = ui.allocate_exact_size(vec2(width, 31.0), Sense::hover());
+                    let mut x = r.left();
+                    for (c, &w) in cells.iter_mut().zip(&widths) {
+                        *c = Rect::from_min_size(pos2(x, r.top()), vec2(w, r.height()));
+                        x += w;
+                    }
+                    draw(ui, i, r, &cells);
+                }
+            });
         });
+        resize.map(|(key, change)| (key.to_owned(), change))
+    }
+    fn apply_column_resize(&mut self, ctx: &Context, id: &str, resize: Option<(String, (f32, bool))>) {
+        if let Some((key, (width, finished))) = resize {
+            self.settings.column_widths.insert(format!("{id}/{key}"), width);
+            ctx.request_repaint();
+            if finished {
+                self.apply_settings(ctx);
+            }
+        }
     }
     fn service_table(&mut self, ui: &mut Ui) {
         if self.services.is_empty() {
@@ -1644,21 +1928,26 @@ impl TaskManager {
             .map(|(i, s)| (i, s.clone()))
             .collect();
         let mut selected = self.service_selected;
-        self.simple_table(ui, "services", &[("Name", 0.30), ("Description", 0.44), ("Status", 0.14), ("Group", 0.12)], rows.len(), |ui, index, r| {
-            let (i, s) = &rows[index];
-            let response = ui.interact(r, ui.id().with(("svc", i)), Sense::click());
-            if selected == Some(*i) || response.hovered() {
-                ui.painter().rect_filled(r, 0.0, card(ui.ctx()));
-            }
-            if response.clicked() {
-                selected = Some(*i);
-            }
-            let mut x = r.left();
-            for (t, w) in [(s.name.clone(), 0.30), (s.description.clone(), 0.44), (s.state.clone(), 0.14), (s.scope.clone(), 0.12)] {
-                cell(ui, Rect::from_min_size(pos2(x, r.top()), vec2(r.width() * w, r.height())), t, false, fg(ui.ctx()), 14.0);
-                x += r.width() * w;
-            }
-        });
+        let resize = self.simple_table(
+            ui,
+            "services",
+            &[("Name", 0.30), ("Description", 0.44), ("Status", 0.14), ("Group", 0.12)],
+            rows.len(),
+            |ui, index, r, cells| {
+                let (i, s) = &rows[index];
+                let response = ui.interact(r, ui.id().with(("svc", i)), Sense::click());
+                if selected == Some(*i) || response.hovered() {
+                    ui.painter().rect_filled(r, 0.0, card(ui.ctx()));
+                }
+                if response.clicked() {
+                    selected = Some(*i);
+                }
+                for (t, &c) in [s.name.as_str(), s.description.as_str(), s.state.as_str(), s.scope.as_str()].iter().zip(cells) {
+                    cell(ui, c, *t, false, fg(ui.ctx()), 14.0);
+                }
+            },
+        );
+        self.apply_column_resize(ui.ctx(), "services", resize);
         self.service_selected = selected;
     }
     fn startup_table(&mut self, ui: &mut Ui) {
@@ -1676,26 +1965,28 @@ impl TaskManager {
             .map(|(i, s)| (i, s.clone()))
             .collect();
         let mut selected = self.startup_selected;
-        self.simple_table(ui, "startup", &[("Name", 0.30), ("Command", 0.43), ("Status", 0.14), ("Source", 0.13)], rows.len(), |ui, index, r| {
-            let (i, s) = &rows[index];
-            let response = ui.interact(r, ui.id().with(("startup", i)), Sense::click());
-            if selected == Some(*i) || response.hovered() {
-                ui.painter().rect_filled(r, 0.0, card(ui.ctx()));
-            }
-            if response.clicked() {
-                selected = Some(*i);
-            }
-            let mut x = r.left();
-            for (t, w) in [
-                (s.name.as_str(), 0.30),
-                (s.command.as_str(), 0.43),
-                (if s.enabled { "Enabled" } else { "Disabled" }, 0.14),
-                (s.source.as_str(), 0.13),
-            ] {
-                cell(ui, Rect::from_min_size(pos2(x, r.top()), vec2(r.width() * w, r.height())), t, false, fg(ui.ctx()), 14.0);
-                x += r.width() * w;
-            }
-        });
+        let resize = self.simple_table(
+            ui,
+            "startup",
+            &[("Name", 0.30), ("Command", 0.43), ("Status", 0.14), ("Source", 0.13)],
+            rows.len(),
+            |ui, index, r, cells| {
+                let (i, s) = &rows[index];
+                let response = ui.interact(r, ui.id().with(("startup", i)), Sense::click());
+                if selected == Some(*i) || response.hovered() {
+                    ui.painter().rect_filled(r, 0.0, card(ui.ctx()));
+                }
+                if response.clicked() {
+                    selected = Some(*i);
+                }
+                for (t, &c) in
+                    [s.name.as_str(), s.command.as_str(), if s.enabled { "Enabled" } else { "Disabled" }, s.source.as_str()].iter().zip(cells)
+                {
+                    cell(ui, c, *t, false, fg(ui.ctx()), 14.0);
+                }
+            },
+        );
+        self.apply_column_resize(ui.ctx(), "startup", resize);
         self.startup_selected = selected;
     }
     fn history_table(&mut self, ui: &mut Ui) {
@@ -1716,28 +2007,24 @@ impl TaskManager {
         let q = self.search.to_lowercase();
         let mut rows: Vec<_> = self.history.values().filter(|h| h.name.to_lowercase().contains(&q) || h.pid.to_string().contains(&q)).collect();
         rows.sort_by(|a, b| b.cpu_seconds.total_cmp(&a.cpu_seconds));
-        self.simple_table(
+        let resize = self.simple_table(
             ui,
             "history",
             &[("Name", 0.38), ("PID", 0.13), ("CPU time", 0.18), ("Disk read", 0.16), ("Disk written", 0.15)],
             rows.len(),
-            |ui, i, r| {
-                let h = rows[i];
-                let mut x = r.left();
-                for (t, w) in [
-                    (h.name.clone(), 0.38),
-                    (h.pid.to_string(), 0.13),
-                    (format!("{:.2} s", h.cpu_seconds), 0.18),
-                    (bytes(h.read as u64), 0.16),
-                    (bytes(h.write as u64), 0.15),
-                ] {
-                    cell(ui, Rect::from_min_size(pos2(x, r.top()), vec2(r.width() * w, r.height())), t, false, fg(ui.ctx()), 14.0);
-                    x += r.width() * w;
+            |ui, i, _r, cells| {
+                let h = &rows[i];
+                for (t, &c) in [h.name.clone(), h.pid.to_string(), format!("{:.2} s", h.cpu_seconds), bytes(h.read as u64), bytes(h.write as u64)]
+                    .iter()
+                    .zip(cells)
+                {
+                    cell(ui, c, t, false, fg(ui.ctx()), 14.0);
                 }
             },
         );
+        self.apply_column_resize(ui.ctx(), "history", resize);
     }
-    fn users_table(&self, ui: &mut Ui) {
+    fn users_table(&mut self, ui: &mut Ui) {
         let mut users: HashMap<String, (u32, f32, u64)> = HashMap::new();
         for p in &self.data.processes {
             let e = users.entry(p.user.clone()).or_default();
@@ -1748,20 +2035,19 @@ impl TaskManager {
         let q = self.search.to_lowercase();
         let mut rows: Vec<_> = users.into_iter().filter(|(u, _)| u.to_lowercase().contains(&q)).collect();
         rows.sort_by(|a, b| b.1 .2.cmp(&a.1 .2));
-        self.simple_table(
+        let resize = self.simple_table(
             ui,
             "users",
             &[("User", 0.42), ("Processes", 0.18), ("CPU", 0.18), ("Memory (sum of RSS)", 0.22)],
             rows.len(),
-            |ui, i, r| {
+            |ui, i, _r, cells| {
                 let (name, (count, cpu, memory)) = &rows[i];
-                let mut x = r.left();
-                for (t, w) in [(name.clone(), 0.42), (count.to_string(), 0.18), (format!("{cpu:.1}%"), 0.18), (bytes(*memory), 0.22)] {
-                    cell(ui, Rect::from_min_size(pos2(x, r.top()), vec2(r.width() * w, r.height())), t, false, fg(ui.ctx()), 14.0);
-                    x += r.width() * w;
+                for (t, &c) in [name.clone(), count.to_string(), format!("{cpu:.1}%"), bytes(*memory)].iter().zip(cells) {
+                    cell(ui, c, t, false, fg(ui.ctx()), 14.0);
                 }
             },
         );
+        self.apply_column_resize(ui.ctx(), "users", resize);
     }
     fn apply_settings(&mut self, ctx: &Context) {
         i18n::set_language(self.settings.language);
@@ -1790,7 +2076,7 @@ impl TaskManager {
     fn settings_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let mut changed = false;
-        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(20.0);
             ui.horizontal(|ui| {
                 ui.add_space(30.0);
@@ -1822,6 +2108,25 @@ impl TaskManager {
                                 changed |= ui.selectable_value(&mut self.settings.start, page, tr(page.title())).changed();
                             }
                         });
+                    });
+                    ui.add_space(3.0);
+                    Self::setting_card(ui, 5, "Footer", "Choose which resource counters appear in the footer", |ui| {
+                        ComboBox::from_id_salt("footer")
+                            .width(180.0)
+                            .selected_text(format!("{} / 6 {}", self.settings.footer.len(), tr("selected")))
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show_ui(ui, |ui| {
+                                for item in FooterItem::all() {
+                                    let mut visible = self.settings.footer.contains(&item);
+                                    if ui.checkbox(&mut visible, tr(item.label())).on_hover_text(tr(item.description())).changed() {
+                                        self.settings.footer.retain(|entry| *entry != item);
+                                        if visible {
+                                            self.settings.footer.push(item);
+                                        }
+                                        changed = true;
+                                    }
+                                }
+                            });
                     });
                     ui.add_space(3.0);
                     Self::setting_card(ui, 3, "Real time update speed", "Choose how often system resource usage is refreshed", |ui| {
@@ -1910,6 +2215,7 @@ impl TaskManager {
         });
     }
     fn dialogs(&mut self, ctx: &Context) {
+        self.application_properties(ctx);
         if demo::enabled() {
             self.authorization = None;
             self.run_dialog = false;
@@ -1937,12 +2243,26 @@ impl TaskManager {
                 self.authorization = None;
             }
             if authenticate {
+                if let PrivilegedAction::Update { key, .. } = &action {
+                    if let Some(view) = self.application.as_mut().filter(|a| a.key() == *key) {
+                        view.update = application_page::UpdateState::Updating;
+                    }
+                }
                 self.authorization = None;
                 self.busy = true;
                 let tx = self.tx.clone();
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(Worker::Action(action.authenticate()));
+                    let result = action.authenticate();
+                    let message = match action {
+                        PrivilegedAction::Network { pid, start, .. } => Worker::Network(
+                            (pid, start),
+                            result.and_then(|s| s.trim().parse::<f32>().map_err(|_| "Invalid network measurement".into())),
+                        ),
+                        PrivilegedAction::Update { key, .. } => Worker::Updated(key, result.map(|_| ())),
+                        _ => Worker::Action(result.map(|_| ())),
+                    };
+                    let _ = tx.send(message);
                     ctx.request_repaint();
                 });
             }
@@ -2069,6 +2389,16 @@ impl eframe::App for TaskManager {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
         self.update_data();
+        if self.data.sampled > 0 {
+            if let Some(pid) = self.application_request.take() {
+                if let Some(process) = self.data.processes.iter().find(|p| p.pid == pid).cloned() {
+                    self.open_application(process);
+                } else {
+                    self.notify("The process exited or changed. Select it again.", true);
+                }
+            }
+        }
+        self.load_application_metadata(ctx);
         if self.frames == 1 {
             ctx.send_viewport_cmd(ViewportCommand::Title(tr("Task Manager").into()));
             if self.page == Page::Services {
@@ -2085,13 +2415,17 @@ impl eframe::App for TaskManager {
                 }));
             }
         }
-        if ctx.input(|i| i.key_pressed(Key::Delete)) && !ctx.wants_keyboard_input() {
+        if ctx.input(|i| i.key_pressed(Key::Delete)) && !ctx.wants_keyboard_input() && self.properties.is_none() {
             self.ask_end();
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.run_dialog = false;
             self.kill_dialog = None;
             self.authorization = None;
+            self.properties = None;
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowLeft)) {
+            self.close_application();
         }
         self.titlebar(ctx);
         self.sidebar(ctx);
@@ -2101,6 +2435,10 @@ impl eframe::App for TaskManager {
             self.toolbar(ui);
             if let Some(error) = &self.data.error {
                 ui.colored_label(ACCENT, error);
+            }
+            if self.application.is_some() {
+                self.application_page(ui);
+                return;
             }
             match self.page {
                 Page::Apps | Page::Processes => self.process_table(ui, false),
@@ -2172,7 +2510,10 @@ fn main() -> eframe::Result<()> {
     }
     if let Some(i) = args.iter().position(|a| a == "--privileged-action") {
         match privilege::helper(&args[i + 1..]) {
-            Ok(()) => std::process::exit(0),
+            Ok(output) => {
+                print!("{output}");
+                std::process::exit(0)
+            }
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(1);
@@ -2184,7 +2525,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--help") {
-        println!("Task Manager for Linux {}\n  --demo                  Fictional data; no system actions or saved settings\n  --version               Print version\n  --screenshot <file.png>  Capture after 120 frames, then exit\n  --page <apps|processes|performance|app-history|startup-apps|users|details|services|settings>\n  --resource <cpu|memory|disk|network|gpu>\n  --language <auto|en|pl>  Interface language\n  --low-memory             Start with reduced refresh and no graphs\n  --self-test              Check live procfs and terminate a disposable child", env!("CARGO_PKG_VERSION"));
+        println!("Task Manager for Linux {}\n  --demo                  Fictional data; no system actions or saved settings\n  --version               Print version\n  --screenshot <file.png>  Capture after 120 frames, then exit\n  --page <apps|processes|performance|app-history|startup-apps|users|details|services|settings>\n  --application <pid>      Open application details for a process\n  --resource <cpu|memory|disk|network|gpu>\n  --language <auto|en|pl>  Interface language\n  --low-memory             Start with reduced refresh and no graphs\n  --self-test              Check live procfs and terminate a disposable child", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let arg = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).cloned();

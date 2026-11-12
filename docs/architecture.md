@@ -4,17 +4,23 @@ This is a single native Linux executable; there is no browser runtime or backend
 
 | Module | Responsibility |
 | --- | --- |
+| application_page.rs | Application summaries, bounded detail histories, subprocess UI and properties |
+| app_details.rs | On-demand package metadata and process-tree traversal |
 | main.rs | egui pages, navigation, settings and action dialogs |
 | model.rs | procfs/sysfs sampling, bounded histories, PID-safe signals, XDG/systemd adapters |
 | process_view.rs | Process trees, app classification and configurable columns |
 | gpu.rs | AMD sysfs telemetry and one persistent read-only NVIDIA query |
 | desktop.rs | XDG application identities and lazy icon decoding |
 | privilege.rs | Polkit authentication and root helper argument allowlist |
+| updates.rs / commands.rs | Package candidate queries, allowlisted updates, bounded command output |
+| process_network.rs | Short NetHogs sampling with process identity validation |
 | integration.rs | Stable app/window identity and per-user launcher |
 | i18n.rs | English/Polish translation |
 | demo.rs | Entirely synthetic, read-only public demonstration data |
 
 A collector thread publishes only its latest snapshot through a replaceable slot. The UI repaints on input or fresh data and virtualizes process rows. Each resource retains at most 60 samples. Process history is session-only, pruned above 4096 identities, and disabled in low-memory mode. The release profile favors binary size.
+
+CPU and RSS subtree totals share a single iterative traversal per collected snapshot, independent of filtering or folding in the UI. Missing, self-linked or reused parents form roots; cycles count each reachable process once. Demo fixtures use the same aggregation.
 
 The GUI never becomes root. Process actions verify PID/start time and use pidfd. Permission failures can offer a separate Polkit helper invocation for one allowlisted action. Service/startup access uses systemd/XDG conventions.
 

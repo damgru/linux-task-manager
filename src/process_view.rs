@@ -6,7 +6,9 @@ pub enum Column {
     Type,
     Status,
     Cpu,
+    TotalCpu,
     Memory,
+    TotalMemory,
     Disk,
     Pid,
     Parent,
@@ -22,13 +24,34 @@ pub enum Column {
     Power,
 }
 impl Column {
-    pub fn all() -> [Self; 18] {
+    pub fn all() -> [Self; 20] {
         use Column::*;
-        [Name, Type, Status, Cpu, Memory, Disk, Pid, Parent, User, Command, Threads, Priority, Read, Write, Network, Gpu, GpuEngine, Power]
+        [
+            Name,
+            Type,
+            Status,
+            Cpu,
+            TotalCpu,
+            Memory,
+            TotalMemory,
+            Disk,
+            Pid,
+            Parent,
+            User,
+            Command,
+            Threads,
+            Priority,
+            Read,
+            Write,
+            Network,
+            Gpu,
+            GpuEngine,
+            Power,
+        ]
     }
     pub fn defaults() -> Vec<Self> {
         use Column::*;
-        vec![Name, Type, Status, Cpu, Memory, Disk, Pid]
+        vec![Name, Type, Status, Cpu, TotalCpu, Memory, TotalMemory, Disk, Pid]
     }
     pub fn details() -> Vec<Self> {
         use Column::*;
@@ -55,7 +78,9 @@ impl Column {
             Type => "Type",
             Status => "Status",
             Cpu => "CPU",
+            TotalCpu => "Total CPU",
             Memory => "Memory",
+            TotalMemory => "Total memory",
             Disk => "Disk",
             Pid => "PID",
             Parent => "Parent PID",
@@ -87,7 +112,9 @@ impl Column {
         Some(match self {
             Name => Sort::Name,
             Cpu => Sort::Cpu,
+            TotalCpu => Sort::TotalCpu,
             Memory => Sort::Memory,
+            TotalMemory => Sort::TotalMemory,
             Disk => Sort::Disk,
             Pid => Sort::Pid,
             Parent => Sort::Parent,
@@ -102,7 +129,20 @@ impl Column {
         })
     }
     pub fn numeric(self) -> bool {
-        matches!(self, Self::Cpu | Self::Memory | Self::Disk | Self::Pid | Self::Parent | Self::Threads | Self::Priority | Self::Read | Self::Write)
+        matches!(
+            self,
+            Self::Cpu
+                | Self::TotalCpu
+                | Self::Memory
+                | Self::TotalMemory
+                | Self::Disk
+                | Self::Pid
+                | Self::Parent
+                | Self::Threads
+                | Self::Priority
+                | Self::Read
+                | Self::Write
+        )
     }
 }
 fn matching_in_group(included: &HashSet<u32>, searching: bool) -> HashSet<u32> {
