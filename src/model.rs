@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 pub const HISTORY: usize = 60;
+const DESKTOP_FILE_LIMIT: u64 = 64 * 1024;
+static STARTUP_WRITE_ID: AtomicU64 = AtomicU64::new(0);
 pub type Series = VecDeque<f32>;
 pub fn push(s: &mut Series, n: f32) {
     if s.len() == HISTORY {
@@ -31,6 +33,14 @@ fn bounded(path: impl AsRef<Path>, limit: u64) -> String {
         let _ = f.take(limit).read_to_string(&mut s);
     }
     s
+}
+fn bounded_desktop_file(path: impl AsRef<Path>) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path).map_err(|e| e.to_string())?.take(DESKTOP_FILE_LIMIT + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > DESKTOP_FILE_LIMIT {
+        return Err("The startup entry exceeds the 64 KiB safety limit.".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "The startup entry is not valid UTF-8.".into())
 }
 #[derive(Clone, Debug, Default)]
 pub struct Process {
@@ -722,7 +732,9 @@ pub fn startups() -> Vec<Startup> {
             if e.path().extension().and_then(|s| s.to_str()) != Some("desktop") {
                 continue;
             }
-            let text = read(e.path());
+            // Desktop entries are user/package supplied input. Do not let one
+            // oversized file consume unbounded memory during catalog loading.
+            let text = bounded_desktop_file(e.path()).unwrap_or_default();
             let get = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").to_string();
             let name = get("Name=");
             if name.is_empty() {
@@ -747,7 +759,10 @@ pub fn startups() -> Vec<Startup> {
     v
 }
 pub fn toggle_startup(s: &Startup) -> Result<(), String> {
-    let text = fs::read_to_string(&s.file).map_err(|e| e.to_string())?;
+    if Path::new(&s.filename).file_name().and_then(|name| name.to_str()) != Some(s.filename.as_str()) || !s.filename.ends_with(".desktop") {
+        return Err("Invalid startup entry name.".into());
+    }
+    let text = bounded_desktop_file(&s.file)?;
     let mut output = String::new();
     let mut in_entry = false;
     let mut found = false;
@@ -770,7 +785,31 @@ pub fn toggle_startup(s: &Startup) -> Result<(), String> {
     }
     let dir = config_dir().join("autostart");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    fs::write(dir.join(&s.filename), output).map_err(|e| e.to_string())
+    atomic_write_startup(&dir.join(&s.filename), output.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Replace a startup entry atomically. rename replaces a symlink itself instead
+/// of following it, preventing an existing destination symlink from redirecting
+/// this write to another user file.
+fn atomic_write_startup(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "startup path has no parent"))?;
+    for _ in 0..16 {
+        let id = STARTUP_WRITE_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = dir.join(format!(".linux-task-manager-{}-{id}.tmp", std::process::id()));
+        let mut file = match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = file.write_all(contents).and_then(|()| file.sync_all()).and_then(|()| fs::rename(&temporary, path));
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        return result;
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "could not allocate a temporary startup file"))
 }
 pub fn launch(command: &str) -> Result<(), String> {
     if command.trim().is_empty() {
@@ -833,6 +872,35 @@ pub fn self_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_startup_input_is_bounded() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("task-manager-desktop-{}-{unique}", std::process::id()));
+        fs::write(&path, vec![b'a'; DESKTOP_FILE_LIMIT as usize]).unwrap();
+        assert_eq!(bounded_desktop_file(&path).unwrap().len(), DESKTOP_FILE_LIMIT as usize);
+        fs::write(&path, vec![b'a'; DESKTOP_FILE_LIMIT as usize + 1]).unwrap();
+        assert!(bounded_desktop_file(&path).is_err(), "oversized startup metadata must be rejected");
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn startup_replacement_does_not_follow_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("task-manager-startup-{}-{unique}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let target = dir.join("important-user-file");
+        let destination = dir.join("entry.desktop");
+        fs::write(&target, "preserve me").unwrap();
+        symlink(&target, &destination).unwrap();
+
+        atomic_write_startup(&destination, b"[Desktop Entry]\nHidden=true\n").unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "preserve me");
+        assert!(!fs::symlink_metadata(&destination).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(destination).unwrap(), "[Desktop Entry]\nHidden=true\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn load_averages_validate_all_three_intervals() {
         assert_eq!(parse_load("1.25 0.84 0.65 2/400 1200\n"), Some([1.25, 0.84, 0.65]));

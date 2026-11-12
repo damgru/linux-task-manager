@@ -4,6 +4,9 @@ This project uses semantic versions and records user-visible changes here. Relea
 
 ## Unreleased
 
+- Limit untrusted `.desktop` metadata to 64 KiB and SVG icons to 2 MiB. Replace toggled startup entries atomically so a destination symlink cannot redirect the write to another user file.
+- Keep administrator-assisted process signals bound to a validated `pidfd`. Do not elevate priority changes because Linux's PID-based priority API cannot pin the validated process identity.
+
 ## 0.0.3 — 2026-11-12
 
 Changes since 0.0.2:

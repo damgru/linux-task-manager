@@ -61,6 +61,9 @@ impl PrivilegedAction {
         }
     }
     pub fn authenticate(&self) -> Result<String, String> {
+        if matches!(self, Self::Process { action: ProcessAction::Efficiency, .. }) {
+            return Err("This process priority change cannot be safely run by the administrator helper.".into());
+        }
         if matches!(self,Self::Service {service,..} if service.scope=="User") {
             return Err("User service authorization must be granted in the current user's systemd session.".into());
         }
@@ -114,13 +117,11 @@ pub fn helper(args: &[String]) -> Result<String, String> {
             }
             crate::updates::install(&target).map(|_| String::new())
         }
-        Some("signal" | "nice") if args.len() == 4 => {
+        Some("signal") if args.len() == 4 => {
             let pid = args[1].parse::<u32>().map_err(|_| "Invalid PID")?;
             let start = args[2].parse::<u64>().map_err(|_| "Invalid process identity")?;
             let value = args[3].parse::<i32>().map_err(|_| "Invalid action")?;
-            if args[0] == "nice" && value == 10 {
-                efficiency(pid, start).map(|_| String::new())
-            } else if args[0] == "signal" && [libc::SIGTERM, libc::SIGKILL, libc::SIGSTOP, libc::SIGCONT].contains(&value) {
+            if [libc::SIGTERM, libc::SIGKILL, libc::SIGSTOP, libc::SIGCONT].contains(&value) {
                 signal_process(pid, start, value).map(|_| String::new())
             } else {
                 Err("Unsupported process action".into())
@@ -142,6 +143,11 @@ fn valid_service(action: &str, unit: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn efficiency_action_never_uses_the_root_helper() {
+        let action = PrivilegedAction::Process { pid: 123, start: 456, name: "example".into(), action: ProcessAction::Efficiency };
+        assert!(action.authenticate().unwrap_err().contains("cannot be safely run"));
+    }
     #[test]
     fn only_allowlisted_service_actions() {
         assert!(valid_service("restart", "ssh.service"));
